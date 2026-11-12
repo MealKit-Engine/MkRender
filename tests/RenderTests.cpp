@@ -1,4 +1,5 @@
 // MkRender tests without an engine. GPU checks only report when there's no GPU (CI machines without one still pass).
+#include "mkrender/Bake.h"
 #include "mkrhi/Rhi.h"
 #if MKRENDER_TESTS_RENDERER
 #include "mkrender/DrawList.h"
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -58,6 +60,58 @@ void testGpu() {
     mkrhi::setLog(nullptr);
 }
 
+// mkbake: values the engine's tests check too, plus the file round trips the engine and the scene editor share
+void testBake() {
+    using namespace mkrender;
+    f32 back[3];
+    unpackRgb9e5(packRgb9e5(1.5f, 0.75f, 0.0f), back);
+    check(std::abs(back[0] - 1.5f) < 0.01f && std::abs(back[1] - 0.75f) < 0.01f && back[2] == 0.0f, "rgb9e5 round trip");
+    const Vec3 px = cubeDirection(0, 0, 0), nz = cubeDirection(5, 0, 0);
+    check(px.x > 0.99f && nz.z < -0.99f, "cube face directions");
+    for (u32 face = 0; face < 6; ++face) {
+        const Vec3 f = cubeFaceForward(face), d = cubeDirection(face, 0, 0);
+        check(dot(f, d) > 0.99f, "cube face camera looks at the face center");
+    }
+    // Flat grey sky: ambient equals the radiance in every direction
+    std::vector<f32> flat(64 * 32 * 3, 0.5f);
+    EnvironmentMap env;
+    bakeEnvironment(flat.data(), 64, 32, env);
+    const Vec3 up = evalSh(env.sh, {0, 1, 0}), side = evalSh(env.sh, {1, 0, 0});
+    check(std::abs(up.x - 0.5f) < 0.02f && std::abs(side.y - 0.5f) < 0.02f, "flat sky ambient");
+    EnvironmentMap read;
+    check(readEnvironmentFile(environmentFileBytes(env), read) && read.reflect == env.reflect && read.sky == env.sky, "environment file round trip");
+    check(!readEnvironmentFile("nope", read), "environment file rejects other bytes");
+    check(environmentCacheName("abc") == environmentCacheName("abc") && environmentCacheName("abc") != environmentCacheName("abd") &&
+              environmentCacheName("abc").size() == 22,
+          "environment cache names");
+    // Probe: six flat faces, file round trip
+    const u32 size = 16;
+    std::vector<f32> faces(static_cast<size_t>(size) * size * 18, 0.25f);
+    ProbeMap probe, probeRead;
+    bakeProbe(faces.data(), size, probe);
+    std::string error;
+    check(probe.size == 16 && probe.mips == 3 && readProbeFile(probeFileBytes(probe), probeRead, error) && probeRead.reflect == probe.reflect,
+          "probe bake and file round trip");
+    // LUT: the neutral table reads back as identity
+    std::vector<f32> lut;
+    check(parseCubeLut(neutralCubeLut(8), 32, lut, error) && lut.size() == 32 * 32 * 32 * 3, "neutral LUT parses");
+    check(std::abs(lut[(5 * 32 * 32 + 9 * 32 + 20) * 3 + 0] - 20.0f / 31.0f) < 1e-4f, "neutral LUT is identity");
+    check(!parseCubeLut("LUT_1D_SIZE 4\n0 0 0\n", 32, lut, error), "1D LUTs are refused");
+    // Textures: mips, compression, cache file
+    std::vector<u8> rgba(8 * 4 * 4, 200);
+    std::vector<std::vector<u8>> mips;
+    buildMips(rgba.data(), 8, 4, true, false, mips);
+    check(mips.size() == 4 && mips.back().size() == 4, "mips down to 1x1");
+    CompressedTexture tex, texRead;
+    if (compressTexture(rgba.data(), 8, 4, TextureUsage::Color, tex)) {
+        check(tex.format == mkrhi::Format::Bc7Srgb && tex.mipLevels == 4 && tex.data.size() == 32 + 16 * 3, "BC7 sizes");
+        check(readTextureFile(textureFileBytes(tex), texRead) && texRead.data == tex.data, "texture file round trip");
+    } else {
+        check(!hasTextureCompression(), "compressTexture fails only without MKBAKE_BC");
+    }
+    check(textureCacheName("x", 1, TextureUsage::Color) != textureCacheName("x", 1, TextureUsage::Normal), "texture cache names include the usage");
+}
+
 #if MKRENDER_TESTS_RENDERER
 void testCulling() {
     using namespace mkrender;
@@ -88,6 +142,7 @@ void testCulling() {
 int main() {
     testFormats();
     testGpu();
+    testBake();
 #if MKRENDER_TESTS_RENDERER
     testCulling();
 #endif

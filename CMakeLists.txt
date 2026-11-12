@@ -15,7 +15,7 @@
 #   MKRENDER_USER_CONFIG       header with the host's own math/mesh/image types (include/mkrender/Config.h), and
 #   MKRENDER_USER_CONFIG_INCLUDE_DIRS  the folders it needs
 cmake_minimum_required(VERSION 3.25)
-project(mkrender VERSION 0.5.0 LANGUAGES C CXX)
+project(mkrender VERSION 0.6.0 LANGUAGES C CXX)
 
 set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
 set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)
@@ -92,6 +92,38 @@ if(MSVC)
     set_source_files_properties(src/mkrhi/vulkan/VkLibs.cpp PROPERTIES COMPILE_OPTIONS "/W0") # volk + VMA implementation
 else()
     target_compile_options(mkrhi PRIVATE -Wall -Wextra)
+endif()
+
+# --- mkbake ---
+# CPU baking without GPU or files (include/mkrender/Bake.h): sky HDRIs, reflection probes, .cube LUTs, texture mips and BC7/BC5.
+# MKBAKE_BC (default ON) compiles the BC encoders from MKBAKE_BC7ENC_DIR (bc7enc.cpp, rgbcx.cpp; default third_party/bc7enc);
+# a host that ships only already compressed textures can turn it off.
+option(MKBAKE_BC "Build BC7/BC5 texture compression into mkbake" ON)
+if(NOT MKBAKE_BC7ENC_DIR)
+    set(MKBAKE_BC7ENC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/bc7enc)
+endif()
+set(mkbake_sources include/mkrender/Bake.h src/mkbake/Bake.cpp src/mkbake/Texture.cpp)
+if(MKBAKE_BC)
+    list(APPEND mkbake_sources ${MKBAKE_BC7ENC_DIR}/bc7enc.cpp ${MKBAKE_BC7ENC_DIR}/rgbcx.cpp)
+endif()
+add_library(mkbake ${mkrender_lib_type} ${mkbake_sources})
+target_include_directories(mkbake PUBLIC include)
+target_link_libraries(mkbake PUBLIC mkrhi)
+target_compile_definitions(mkbake PRIVATE MKBAKE_BC=$<BOOL:${MKBAKE_BC}> $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>)
+if(MKBAKE_BC)
+    target_include_directories(mkbake SYSTEM PRIVATE ${MKBAKE_BC7ENC_DIR})
+endif()
+if(MKRENDER_USER_CONFIG)
+    target_compile_definitions(mkbake PUBLIC MKRENDER_USER_CONFIG="${MKRENDER_USER_CONFIG}")
+    target_include_directories(mkbake PUBLIC ${MKRENDER_USER_CONFIG_INCLUDE_DIRS})
+endif()
+if(MSVC)
+    target_compile_options(mkbake PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus)
+    if(MKBAKE_BC)
+        set_source_files_properties(${MKBAKE_BC7ENC_DIR}/bc7enc.cpp ${MKBAKE_BC7ENC_DIR}/rgbcx.cpp PROPERTIES COMPILE_OPTIONS "/W0")
+    endif()
+else()
+    target_compile_options(mkbake PRIVATE -Wall -Wextra)
 endif()
 
 # --- mkrender ---
@@ -210,7 +242,7 @@ endif()
 if(MKRENDER_BUILD_TESTS)
     enable_testing()
     add_executable(mkrender_tests tests/RenderTests.cpp)
-    target_link_libraries(mkrender_tests PRIVATE mkrhi)
+    target_link_libraries(mkrender_tests PRIVATE mkrhi mkbake)
     if(TARGET mkrender)
         target_link_libraries(mkrender_tests PRIVATE mkrender)
         target_compile_definitions(mkrender_tests PRIVATE MKRENDER_TESTS_RENDERER=1)

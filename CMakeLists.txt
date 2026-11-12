@@ -2,7 +2,7 @@
 #   mkrhi     thin graphics API layer (DX12 or Vulkan), takes a native window handle and size
 #   mkrender  forward renderer on mkrhi with plain inputs, its shaders compiled by DXC at build time (MKRENDER_DXC)
 # No engine headers; the host passes a log callback (mkrhi::setLog) and, optionally, Dear ImGui and Tracy targets.
-# Built standalone it includes tests and the MkRender viewer (tool/, Windows); added by another project with add_subdirectory, only the libraries.
+# Built standalone it includes tests and the MkRender scene editor (tool/, Windows); added by another project with add_subdirectory, only the libraries.
 #   cmake -S . -B build && cmake --build build && ctest --test-dir build
 # Values the including side can set:
 #   MKRHI_BACKEND              DX12 (default) or Vulkan
@@ -15,7 +15,7 @@
 #   MKRENDER_USER_CONFIG       header with the host's own math/mesh/image types (include/mkrender/Config.h), and
 #   MKRENDER_USER_CONFIG_INCLUDE_DIRS  the folders it needs
 cmake_minimum_required(VERSION 3.25)
-project(mkrender VERSION 0.3.0 LANGUAGES C CXX)
+project(mkrender VERSION 0.4.0 LANGUAGES C CXX)
 
 set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
 set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)
@@ -26,7 +26,7 @@ if(WIN32 AND PROJECT_IS_TOP_LEVEL)
 else()
     set(mkrender_tool_default OFF)
 endif()
-option(MKRENDER_BUILD_TOOL "Build the MkRender viewer (SDL3 + Dear ImGui, needs MKRENDER_DXC)" ${mkrender_tool_default})
+option(MKRENDER_BUILD_TOOL "Build the MkRender scene editor (SDL3 + Dear ImGui, needs MKRENDER_DXC)" ${mkrender_tool_default})
 if(MKRENDER_OBJECT_LIBRARIES)
     set(mkrender_lib_type OBJECT)
 else()
@@ -38,7 +38,7 @@ if(MKRHI_BACKEND STREQUAL "Vulkan" AND NOT MKRHI_VULKAN_INCLUDE_DIRS)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/volk ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vma)
 endif()
 
-# The viewer's SDL3 and ImGui targets come first: mkrhi builds its ImGui backend against them (MKRHI_IMGUI_TARGET)
+# The scene editor's SDL3 and ImGui targets come first: mkrhi builds its ImGui backend against them (MKRHI_IMGUI_TARGET)
 if(MKRENDER_BUILD_TOOL AND NOT MKRHI_IMGUI_TARGET)
     include(tool/Libs.cmake)
 endif()

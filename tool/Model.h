@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-// CPU side of what the viewer shows: a glTF file or built-in shapes, before upload (App::upload)
+// CPU side of a glTF model before upload (Assets::model), and built-in shapes
 namespace mkrender::tool {
 
 // Decoded texture (RGBA8). srgb: base color / emissive, linear: normal and metallic-roughness maps

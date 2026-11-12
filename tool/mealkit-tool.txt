@@ -4,4 +4,4 @@ name MkRender
 exe MkRender
 version @MKRENDER_VERSION@
 protocol 1
-opens .gltf .glb
+opens .scene .gltf .glb

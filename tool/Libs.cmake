@@ -1,4 +1,4 @@
-# Libraries of the MkRender viewer (tool/), included by the top CMakeLists.txt before mkrhi so mkrhi builds its ImGui backend
+# Libraries of the MkRender scene editor (tool/), included by the top CMakeLists.txt before mkrhi so mkrhi builds its ImGui backend
 # (MKRHI_IMGUI_TARGET). SDL3 static without tests/examples, Dear ImGui (docking) with the SDL3 platform backend and the
 # drawing backend of MKRHI_BACKEND.
 

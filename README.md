@@ -9,7 +9,7 @@ The renderer of the [MealKit](https://github.com/MealKit-Engine/MealKit) engine 
 | `mkrhi` | Thin graphics layer over DX12 (reference) or Vulkan 1.3: device and swap chain from a native window handle, frame command lists, static buffers, textures, offscreen and depth targets, pipelines with one bindless binding layout, a per-frame upload ring, GPU timestamps, back buffer capture, an on-disk pipeline cache |
 | `mkrender` | Forward renderer on `mkrhi` with plain inputs: meshes, materials, 48-byte instances, point lights, camera, sprites, particles, UI quads; PBR/toon/unlit lighting, sun shadows (CSM), sky HDRI and reflection probes, bloom/AgX/LUT post, dynamic resolution, frustum culling in `DrawList`. Shaders (`shaders/`) are compiled to byte arrays at build time |
 
-**MkRender** (`build/bin/MkRender.exe`) is a viewer built on them: open a glTF model or a material sphere grid and change lighting, shadows, post-processing and materials live (below).
+**MkRender** (`build/bin/MkRender.exe`) is a scene editor built on them, like MkUI for `.ui` screens and MkAudio for sound events: it opens a MealKit project's `.scene` files with a hierarchy, a viewport and an inspector, and saves them for the engine (below).
 
 The libraries include no engine header. The host sets a log callback and passes plain values:
 
@@ -74,23 +74,25 @@ A host that already has a `Vec3`/`Quat`/`Mat4`, a vertex and material struct or 
 
 `requestCapture(fn, user)` hands the back buffer to `fn` at the next `endFrame` (the host writes the file); `captureTarget` reads an offscreen target.
 
-## MkRender viewer
+## MkRender scene editor
 
-`tool/` is a small look-development app: an SDL3 window drawn by `mkrender`, with Dear ImGui panels docked beside the 3D view.
+`tool/` edits a MealKit project's scenes (`assets/scenes/*.scene`) without the engine: an SDL3 window drawn by `mkrender`, Dear ImGui panels docked around the 3D view, ImGuizmo handles.
 
-- **Scene**: open `.gltf`/`.glb` (File menu, Ctrl+O, or drop a file on the window; F5 reloads), or the 5x5 material sphere grid (metallic x roughness); floor, turntable, field of view, dissolve and flash instance effects
-- **Lighting**: PBR / toon / unlit, sun direction, color and intensity, sky/ground/fog colors, sun shadows (cascades, map size, distance), orbiting point lights, wind
-- **Post**: AgX tone mapping, exposure, bloom, vignette, grain, chromatic aberration, screen tint, and the player options (FXAA, brightness, color blindness)
-- **Materials**: base color, metallic, roughness, emissive, normal scale, alpha cutoff, and the style features (outline, rim, wind, dissolve), applied as you drag (`Renderer::updateMaterial`)
-- **Stats**: fps, draw calls, culled instances, GPU time per pass, GPU memory, view modes (wireframe, normals, overdraw, features), vsync, log
+- **Hierarchy**: every object with its kind, parents and children (drag one onto another to parent it, onto empty space to move it to the top level), scene tree folders, search, add / duplicate / delete
+- **Viewport**: the scene drawn with the project's lighting model (`lightingModel` in `mealkit.project`), sun shadows, point lights and post values from the scene; click to select, W/E/R move/rotate/scale handles (Ctrl snaps), F frames the selection; right drag orbits (with WASD/QE to fly), middle drag pans, the wheel zooms. Spawn points, lights and cameras show as icons; probes, reverb zones and game kinds without a model as line boxes (Alt shows names)
+- **Inspector**: name, kind (built-in or a game kind's name), folder or parent, parent-relative position / rotation / scale, model (glTF under `assets/`), color, checker, and the object's field lines with widgets picked from their text (numbers, true/false, `#RRGGBB` colors, camera enums); fields can be added and removed
+- **Environment**: sun direction and color, sky / ground / fog, sky HDRI file values, post-processing (tone mapping, exposure, bloom, vignette, grain, chromatic aberration, LUT file)
+- Undo/redo (Ctrl+Z / Ctrl+Y), save (Ctrl+S), save as, new scene, project scene list; a file changed by the MealKit editor reloads by itself when nothing is edited here, or asks
 
-Left drag orbits, right/middle drag or Shift+left drag pans, the wheel zooms, F frames the model. File > Save screenshot writes the 3D view without panels to the settings folder (`%APPDATA%\MealKit\MkRender`).
+The file is written the way the engine's scene module writes it (same keys, order, shortest float text, `field` lines), so a scene the engine saved comes back byte for byte, and older formats are upgraded like the engine does. Game kinds' fields are kept as text, so nothing is lost without the game's code. Terrain draws its heightmap; scatter layers and sprites show as icons and HDRIs/LUTs aren't applied yet (their values are still edited and saved).
 
 ```
-MkRender [model.glb] [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture out.png] [--version]
+MkRender [--project <folder>] [--file <.scene|.gltf|.glb>] [--select <id>] [--lighting pbr|toon|unlit]
+         [--debug-layer] [--frames N --capture out.png] [--version]
+MkRender --check-scene <file.scene>   # read + write in memory: same / upgraded / FAIL with the first differing line
 ```
 
-Models are read like MealKit reads them (glTF metallic-roughness, base color/normal/metallic-roughness/emissive textures, alpha mask, z flipped to left-handed); skins are shown in the bind pose. The build writes `mealkit-tool.txt` next to the exe, so the MealKit editor lists it in its [Tools] menu when that folder is in `%LOCALAPPDATA%\MealKit\tools\render\` or given with `--tool-path`.
+A `.gltf`/`.glb` opens in a new unsaved scene as one decoration. The build writes `mealkit-tool.txt` next to the exe (`opens .scene .gltf .glb`), so the MealKit editor lists MkRender in its [Tools] menu when that folder is in `%LOCALAPPDATA%\MealKit\tools\render\` or given with `--tool-path`; the editor starts tools with `--project <folder> --file <file>`.
 
 ## Building
 
@@ -110,9 +112,9 @@ Options for a host project that adds it with `add_subdirectory`:
 | `MKRENDER_OBJECT_LIBRARIES` | `ON` builds OBJECT libraries (for a host DLL that exports every symbol) |
 | `MKRENDER_DXC` | `dxc` with SPIR-V support (default: on `PATH` or MealKit's download cache). Without it only `mkrhi` is built |
 | `MKRENDER_USER_CONFIG`, `MKRENDER_USER_CONFIG_INCLUDE_DIRS` | your own types (above) and the folders that header needs |
-| `MKRENDER_BUILD_TOOL` | the viewer (default: on when built standalone on Windows; it needs `mkrender`, so a DXC) |
+| `MKRENDER_BUILD_TOOL` | the scene editor (default: on when built standalone on Windows; it needs `mkrender`, so a DXC) |
 
-`third_party/` holds what the standalone build and the viewer use: Vulkan-Headers, volk, VMA, SDL3, Dear ImGui (docking), cgltf and stb_image, each with its license. A host that adds MkRender with `add_subdirectory` uses its own copies through the variables above.
+`third_party/` holds what the standalone build and the scene editor use: Vulkan-Headers, volk, VMA, SDL3, Dear ImGui (docking), ImGuizmo, cgltf and stb_image, each with its license. A host that adds MkRender with `add_subdirectory` uses its own copies through the variables above.
 
 GPU capture tools (RenderDoc, PIX) are loaded by the host from `DeviceDesc::beforeDeviceCreate`, which runs right before the device is made.
 

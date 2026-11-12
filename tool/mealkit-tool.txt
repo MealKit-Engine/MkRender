@@ -1,0 +1,7 @@
+# MealKit tool manifest (MealKit tool contract: the editor's Tools menu reads this file next to the program)
+@format tool 1
+name MkRender
+exe MkRender
+version @MKRENDER_VERSION@
+protocol 1
+opens .gltf .glb

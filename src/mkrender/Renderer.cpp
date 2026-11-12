@@ -229,6 +229,7 @@ struct GpuMesh {
     bool outline = false; // at least one outline material: drawn once more with the outline pass
     bool skinned = false; // 32-byte vertices (GpuVertex + SkinWeights), drawn with the skin pipeline
     bool alphaClip = false; // an alpha mask or dissolve material (discard turns off early depth: DrawList draws it last)
+    std::vector<u16> materials; // material indices its vertices use (updateMaterial recomputes outline/alphaClip)
     Vec3 boxCenter, boxExtent; // GpuVertex position quantization box (ForwardPush)
     u32 stride() const { return skinned ? kGpuSkinnedVertexStride : sizeof(GpuVertex); }
     void setBox(ForwardPush& push) const {
@@ -680,7 +681,8 @@ void Renderer::resize(u32 width, u32 height) {
     if (m) m->device.resize(width, height);
 }
 
-u32 Renderer::createMaterial(const MaterialData& d) {
+namespace {
+MaterialGpu toGpu(const MaterialData& d) {
     MaterialGpu g{};
     std::memcpy(g.baseColor, d.baseColor, sizeof(g.baseColor));
     std::memcpy(g.emissive, d.emissive, sizeof(g.emissive));
@@ -698,12 +700,32 @@ u32 Renderer::createMaterial(const MaterialData& d) {
     std::memcpy(g.dissolveColor, d.dissolveColor, sizeof(g.dissolveColor));
     g.dissolveEdge = d.dissolveEdge;
     g.windStrength = d.windStrength;
+    return g;
+}
+} // namespace
+
+u32 Renderer::createMaterial(const MaterialData& d) {
+    const MaterialGpu g = toGpu(d);
     if (m->materials.size() >= 0xFFFF) { // vertex material is 16-bit
         MKRHI_WARN("createMaterial: too many materials, using the default");
         return 0;
     }
     m->materials.push_back(g);
     return static_cast<u32>(m->materials.size() - 1);
+}
+
+void Renderer::updateMaterial(u32 index, const MaterialData& d) {
+    if (!m || index >= m->materials.size()) return;
+    m->materials[index] = toGpu(d);
+    for (GpuMesh& mesh : m->meshes) {
+        if (std::find(mesh.materials.begin(), mesh.materials.end(), index) == mesh.materials.end()) continue;
+        mesh.outline = mesh.alphaClip = false;
+        for (u16 i : mesh.materials) {
+            const MaterialGpu& mat = m->materials[i];
+            mesh.outline |= (mat.features & kMaterialOutline) != 0;
+            mesh.alphaClip |= mat.alphaCutoff > 0.0f || (mat.features & kMaterialDissolve) != 0;
+        }
+    }
 }
 
 u32 Renderer::createTexture(const mkrhi::TextureInit& init) {
@@ -752,7 +774,8 @@ MeshId Renderer::createMesh(const MeshData& data) {
     mesh.vertexBuffer = m->device.createBuffer(mkrhi::BufferUsage::Vertex, packed.data(), packed.size());
     // With few vertices, shrink to 16-bit indices to save memory bandwidth (important on integrated graphics)
     if (data.vertices.size() <= 0xFFFF) {
-        const std::vector<u16> shortIndices(data.indices.begin(), data.indices.end());
+        std::vector<u16> shortIndices(data.indices.size());
+        for (size_t i = 0; i < shortIndices.size(); ++i) shortIndices[i] = static_cast<u16>(data.indices[i]);
         mesh.indexBuffer = m->device.createBuffer(mkrhi::BufferUsage::Index16, shortIndices.data(),
                                                   shortIndices.size() * sizeof(u16));
     } else {
@@ -765,6 +788,7 @@ MeshId Renderer::createMesh(const MeshData& data) {
     mesh.bounds = boundingSphere(points.data(), points.size());
     for (const Vertex& v : data.vertices) {
         if (v.material >= m->materials.size()) continue;
+        if (std::find(mesh.materials.begin(), mesh.materials.end(), v.material) == mesh.materials.end()) mesh.materials.push_back(v.material);
         const MaterialGpu& mat = m->materials[v.material];
         mesh.outline |= (mat.features & kMaterialOutline) != 0;
         mesh.alphaClip |= mat.alphaCutoff > 0.0f || (mat.features & kMaterialDissolve) != 0;

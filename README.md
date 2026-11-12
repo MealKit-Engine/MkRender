@@ -9,6 +9,8 @@ The renderer of the [MealKit](https://github.com/MealKit-Engine/MealKit) engine 
 | `mkrhi` | Thin graphics layer over DX12 (reference) or Vulkan 1.3: device and swap chain from a native window handle, frame command lists, static buffers, textures, offscreen and depth targets, pipelines with one bindless binding layout, a per-frame upload ring, GPU timestamps, back buffer capture, an on-disk pipeline cache |
 | `mkrender` | Forward renderer on `mkrhi` with plain inputs: meshes, materials, 48-byte instances, point lights, camera, sprites, particles, UI quads; PBR/toon/unlit lighting, sun shadows (CSM), sky HDRI and reflection probes, bloom/AgX/LUT post, dynamic resolution, frustum culling in `DrawList`. Shaders (`shaders/`) are compiled to byte arrays at build time |
 
+**MkRender** (`build/bin/MkRender.exe`) is a viewer built on them: open a glTF model or a material sphere grid and change lighting, shadows, post-processing and materials live (below).
+
 The libraries include no engine header. The host sets a log callback and passes plain values:
 
 ```cpp
@@ -72,10 +74,28 @@ A host that already has a `Vec3`/`Quat`/`Mat4`, a vertex and material struct or 
 
 `requestCapture(fn, user)` hands the back buffer to `fn` at the next `endFrame` (the host writes the file); `captureTarget` reads an offscreen target.
 
+## MkRender viewer
+
+`tool/` is a small look-development app: an SDL3 window drawn by `mkrender`, with Dear ImGui panels docked beside the 3D view.
+
+- **Scene**: open `.gltf`/`.glb` (File menu, Ctrl+O, or drop a file on the window; F5 reloads), or the 5x5 material sphere grid (metallic x roughness); floor, turntable, field of view, dissolve and flash instance effects
+- **Lighting**: PBR / toon / unlit, sun direction, color and intensity, sky/ground/fog colors, sun shadows (cascades, map size, distance), orbiting point lights, wind
+- **Post**: AgX tone mapping, exposure, bloom, vignette, grain, chromatic aberration, screen tint, and the player options (FXAA, brightness, color blindness)
+- **Materials**: base color, metallic, roughness, emissive, normal scale, alpha cutoff, and the style features (outline, rim, wind, dissolve), applied as you drag (`Renderer::updateMaterial`)
+- **Stats**: fps, draw calls, culled instances, GPU time per pass, GPU memory, view modes (wireframe, normals, overdraw, features), vsync, log
+
+Left drag orbits, right/middle drag or Shift+left drag pans, the wheel zooms, F frames the model. File > Save screenshot writes the 3D view without panels to the settings folder (`%APPDATA%\MealKit\MkRender`).
+
+```
+MkRender [model.glb] [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture out.png] [--version]
+```
+
+Models are read like MealKit reads them (glTF metallic-roughness, base color/normal/metallic-roughness/emissive textures, alpha mask, z flipped to left-handed); skins are shown in the bind pose. The build writes `mealkit-tool.txt` next to the exe, so the MealKit editor lists it in its [Tools] menu when that folder is in `%LOCALAPPDATA%\MealKit\tools\render\` or given with `--tool-path`.
+
 ## Building
 
 ```
-build.bat                     # Windows: DX12, Release, Ninja; runs the tests (mkrender needs a DXC with SPIR-V support)
+build.bat                     # Windows: DX12, Release, Ninja; runs the tests (mkrender needs a DXC with SPIR-V support); add Vulkan for the Vulkan backend into build-vulkan\
 cmake -S . -B build && cmake --build build && ctest --test-dir build
 ```
 
@@ -84,12 +104,15 @@ Options for a host project that adds it with `add_subdirectory`:
 | Variable | Meaning |
 |---|---|
 | `MKRHI_BACKEND` | `DX12` (default) or `Vulkan` |
-| `MKRHI_VULKAN_INCLUDE_DIRS` | Vulkan headers, volk and VMA folders (required for Vulkan; volk loads `vulkan-1` at run time, no SDK needed) |
+| `MKRHI_VULKAN_INCLUDE_DIRS` | Vulkan headers, volk and VMA folders (default: the copies in `third_party/`; volk loads `vulkan-1` at run time, no SDK needed) |
 | `MKRHI_IMGUI_TARGET` | a Dear ImGui target with the matching backend: builds `mkrhi::imgui*` for debug UI. Only its include folders are used; the host links ImGui |
 | `MKRHI_TRACY_TARGET` | a Tracy target: GPU frame zones on DX12 when it defines `TRACY_ENABLE` |
 | `MKRENDER_OBJECT_LIBRARIES` | `ON` builds OBJECT libraries (for a host DLL that exports every symbol) |
 | `MKRENDER_DXC` | `dxc` with SPIR-V support (default: on `PATH` or MealKit's download cache). Without it only `mkrhi` is built |
 | `MKRENDER_USER_CONFIG`, `MKRENDER_USER_CONFIG_INCLUDE_DIRS` | your own types (above) and the folders that header needs |
+| `MKRENDER_BUILD_TOOL` | the viewer (default: on when built standalone on Windows; it needs `mkrender`, so a DXC) |
+
+`third_party/` holds what the standalone build and the viewer use: Vulkan-Headers, volk, VMA, SDL3, Dear ImGui (docking), cgltf and stb_image, each with its license. A host that adds MkRender with `add_subdirectory` uses its own copies through the variables above.
 
 GPU capture tools (RenderDoc, PIX) are loaded by the host from `DeviceDesc::beforeDeviceCreate`, which runs right before the device is made.
 

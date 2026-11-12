@@ -298,6 +298,8 @@ public:
     void replaceMesh(MeshId id, const MeshData& mesh);
     // Referenced by vertex material indices. Index 0 is default white (created by init)
     u32 createMaterial(const MaterialData& material);
+    // New values for an existing material (the table is uploaded every frame, so it shows from the next frame): material editors
+    void updateMaterial(u32 index, const MaterialData& material);
     // Texture with mips (render/TextureCache.h). The bindless index read by shaders
     u32 createTexture(const mkrhi::TextureInit& init);
     // Mesh local bounding sphere (createMesh computes it from vertices). Radius 0 for missing meshes

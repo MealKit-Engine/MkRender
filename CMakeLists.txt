@@ -2,11 +2,11 @@
 #   mkrhi     thin graphics API layer (DX12 or Vulkan), takes a native window handle and size
 #   mkrender  forward renderer on mkrhi with plain inputs, its shaders compiled by DXC at build time (MKRENDER_DXC)
 # No engine headers; the host passes a log callback (mkrhi::setLog) and, optionally, Dear ImGui and Tracy targets.
-# Built standalone it includes tests; added by another project with add_subdirectory, only the libraries.
+# Built standalone it includes tests and the MkRender viewer (tool/, Windows); added by another project with add_subdirectory, only the libraries.
 #   cmake -S . -B build && cmake --build build && ctest --test-dir build
 # Values the including side can set:
 #   MKRHI_BACKEND              DX12 (default) or Vulkan
-#   MKRHI_VULKAN_INCLUDE_DIRS  Vulkan headers, volk and VMA folders (required for Vulkan; the loader is loaded at run time by volk)
+#   MKRHI_VULKAN_INCLUDE_DIRS  Vulkan headers, volk and VMA folders (default: this repo's third_party/; the loader is loaded at run time by volk)
 #   MKRHI_IMGUI_TARGET         Dear ImGui target with the backend for MKRHI_BACKEND: builds mkrhi::imgui* (debug UI drawing).
 #                              Only its include folders and definitions are used; the host links ImGui itself
 #   MKRHI_TRACY_TARGET         Tracy target (defines TRACY_ENABLE when profiling): GPU frame zones on DX12. Used the same way
@@ -15,16 +15,32 @@
 #   MKRENDER_USER_CONFIG       header with the host's own math/mesh/image types (include/mkrender/Config.h), and
 #   MKRENDER_USER_CONFIG_INCLUDE_DIRS  the folders it needs
 cmake_minimum_required(VERSION 3.25)
-project(mkrender VERSION 0.2.0 LANGUAGES CXX)
+project(mkrender VERSION 0.3.0 LANGUAGES C CXX)
 
 set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
 set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)
 option(MKRENDER_OBJECT_LIBRARIES "Build OBJECT libraries instead of STATIC" OFF)
 option(MKRENDER_BUILD_TESTS "Build MkRender tests" ${PROJECT_IS_TOP_LEVEL})
+if(WIN32 AND PROJECT_IS_TOP_LEVEL)
+    set(mkrender_tool_default ON)
+else()
+    set(mkrender_tool_default OFF)
+endif()
+option(MKRENDER_BUILD_TOOL "Build the MkRender viewer (SDL3 + Dear ImGui, needs MKRENDER_DXC)" ${mkrender_tool_default})
 if(MKRENDER_OBJECT_LIBRARIES)
     set(mkrender_lib_type OBJECT)
 else()
     set(mkrender_lib_type STATIC)
+endif()
+
+if(MKRHI_BACKEND STREQUAL "Vulkan" AND NOT MKRHI_VULKAN_INCLUDE_DIRS)
+    set(MKRHI_VULKAN_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan-headers/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/volk ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vma)
+endif()
+
+# The viewer's SDL3 and ImGui targets come first: mkrhi builds its ImGui backend against them (MKRHI_IMGUI_TARGET)
+if(MKRENDER_BUILD_TOOL AND NOT MKRHI_IMGUI_TARGET)
+    include(tool/Libs.cmake)
 endif()
 
 # --- mkrhi ---
@@ -36,9 +52,6 @@ set(mkrhi_sources
     src/mkrhi/Files.cpp
     src/mkrhi/PipelineCache.h)
 if(MKRHI_BACKEND STREQUAL "Vulkan")
-    if(NOT MKRHI_VULKAN_INCLUDE_DIRS)
-        message(FATAL_ERROR "MKRHI_BACKEND Vulkan needs MKRHI_VULKAN_INCLUDE_DIRS (Vulkan headers, volk, VMA)")
-    endif()
     list(APPEND mkrhi_sources src/mkrhi/vulkan/Vk.h src/mkrhi/vulkan/VkDevice.cpp src/mkrhi/vulkan/VkLibs.cpp)
     set(mkrhi_imgui_source src/mkrhi/vulkan/VkImGui.cpp)
 elseif(MKRHI_BACKEND STREQUAL "DX12")
@@ -208,4 +221,8 @@ if(MKRENDER_BUILD_TESTS)
         target_compile_options(mkrender_tests PRIVATE -Wall -Wextra)
     endif()
     add_test(NAME mkrender_tests COMMAND mkrender_tests WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endif()
+
+if(MKRENDER_BUILD_TOOL AND TARGET mkrender)
+    add_subdirectory(tool)
 endif()

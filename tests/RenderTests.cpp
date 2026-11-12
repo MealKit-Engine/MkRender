@@ -41,8 +41,11 @@ void testGpu() {
     mkrhi::setLog(&captureLog, &logs);
     const char* backend = mkrhi::backendName();
     check(std::strcmp(backend, "dx12") == 0 || std::strcmp(backend, "vulkan") == 0, "backend name");
+    // DX12 judges the feature fields; Vulkan records what's missing in GpuInfo::unsupported while querying
     mkrhi::GpuInfo none;
-    check(!mkrhi::gpuMinimumError(none).empty(), "an empty GpuInfo is below the minimum spec");
+    if (std::strcmp(backend, "dx12") == 0) check(!mkrhi::gpuMinimumError(none).empty(), "an empty GpuInfo is below the minimum spec");
+    none.unsupported = "missing feature";
+    check(!mkrhi::gpuMinimumError(none).empty(), "a GpuInfo with a missing feature is below the minimum spec");
     mkrhi::GpuInfo gpu;
     std::string error;
     if (mkrhi::queryGpu(gpu, &error)) {

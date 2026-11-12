@@ -6,8 +6,11 @@ on:
 
 jobs:
   build:
-    name: Windows MSVC (DX12)
+    name: Windows MSVC (${{ matrix.backend }})
     runs-on: windows-latest
+    strategy:
+      matrix:
+        backend: [DX12, Vulkan]
     steps:
       - uses: actions/checkout@v7
       - name: MSVC environment
@@ -17,7 +20,7 @@ jobs:
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | Where-Object { $_ -match '^[^=]+=' } | Out-File $env:GITHUB_ENV -Append -Encoding utf8
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMKRHI_BACKEND=${{ matrix.backend }}
       - name: Build
         run: cmake --build build
       - name: Test (no GPU)

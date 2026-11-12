@@ -1,6 +1,6 @@
 // MkRender executable: SDL3 window, mkrender drawing into it (DX12 or Vulkan, the backend MkRender was built with),
 // Dear ImGui panels drawn by mkrhi's ImGui backend. The actual screen is App (scene editor).
-//   MkRender [--project <MealKit project folder>] [--file <.scene|.gltf|.glb>] [file] [--select <id>]
+//   MkRender [--project <MealKit project folder>] [--file <.scene|.gltf|.glb>] [file] [--select <id>[,<id>...]]
 //            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--version]
 //   MkRender --check-scene <file.scene>   reads and writes the scene in memory: "SCENE same" when the text comes back
 //            unchanged, "SCENE equal" when only float text differs (old %.9g files), else the first differing line (exit 1)
@@ -138,7 +138,7 @@ int checkScene(const std::string& path) {
 int main(int argc, char** argv) {
     std::string project, file, capture;
     long frames = 0; // --frames N: quit after N frames (--capture saves the last one as PNG, for docs and tests)
-    unsigned long selectId = 0;
+    std::string selectIds; // --select 5 or 5,7,9
     bool debugLayer = false;
     int lighting = -1;
     for (int i = 1; i < argc; ++i) {
@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) capture = argv[++i];
         else if (std::strcmp(argv[i], "--project") == 0 && i + 1 < argc) project = argv[++i];
         else if (std::strcmp(argv[i], "--file") == 0 && i + 1 < argc) file = argv[++i];
-        else if (std::strcmp(argv[i], "--select") == 0 && i + 1 < argc) selectId = std::strtoul(argv[++i], nullptr, 10);
+        else if (std::strcmp(argv[i], "--select") == 0 && i + 1 < argc) selectIds = argv[++i];
         else if (std::strcmp(argv[i], "--debug-layer") == 0) debugLayer = true;
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
@@ -218,7 +218,14 @@ int main(int argc, char** argv) {
     if (!project.empty() && file.empty()) app.openProject(project);
     else if (!file.empty()) app.openFile(file);
     if (lighting >= 0) app.setLightingModel(static_cast<mkrender::LightingModel>(lighting));
-    if (selectId) app.select(static_cast<mkrender::u32>(selectId));
+    for (const char* c = selectIds.c_str(); *c;) {
+        char* end = nullptr;
+        const unsigned long id = std::strtoul(c, &end, 10);
+        if (end == c) break;
+        if (c == selectIds.c_str()) app.select(static_cast<mkrender::u32>(id));
+        else app.addToSelection(static_cast<mkrender::u32>(id));
+        c = *end == ',' ? end + 1 : end;
+    }
 
     mkrender::DrawList list;
     Uint64 last = SDL_GetPerformanceCounter();

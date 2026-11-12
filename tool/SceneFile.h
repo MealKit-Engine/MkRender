@@ -90,6 +90,13 @@ bool readScene(const std::string& text, Scene& out, std::string& error, std::vec
 bool loadScene(const std::string& path, Scene& out, std::string& error, std::vector<std::string>* warnings);
 bool saveScene(const std::string& path, const Scene& scene, std::string& error);
 
+// Prefabs (assets/prefabs/*.prefab, "@format prefab 1": entity blocks only), like the engine's scene::savePrefab/placePrefab:
+// roots (with children) in world coordinates relative to the first root's x/z, ids renumbered from 1; placing adds copies with new ids
+std::string writePrefab(const Scene& scene, const std::vector<u32>& roots);
+bool loadPrefab(const std::string& path, Scene& out, std::string& error);
+std::vector<u32> placePrefab(Scene& scene, const Scene& prefab, const Transform& at); // new root ids
+Transform combineTransforms(const Transform& parent, const Transform& local);
+
 std::string floatText(f32 v);           // shortest text that reads back to the same float, -0 as 0 (the engine's text::writeFloats)
 std::string floatsText(const f32* v, int count);
 // "#RRGGBB" / "#RRGGBBAA" (reflect Color fields) <-> linear-free sRGB bytes

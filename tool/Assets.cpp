@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -160,6 +161,99 @@ void Assets::reloadAll() {
     m_renderer->waitIdle();
     m_models.clear();
     m_terrains.clear();
+    m_images.clear();
+    m_sprites.clear();
+    m_scatters.clear();
+}
+
+const SpriteEntry& Assets::sprite(const std::string& image, int columns, int rows, int cell, f32 pivotX, f32 pivotY, bool flipX, bool flipY) {
+    columns = std::max(columns, 1);
+    rows = std::max(rows, 1);
+    cell = std::clamp(cell, 0, columns * rows - 1);
+    char key[96];
+    std::snprintf(key, sizeof(key), "|%d|%d|%d|%g|%g|%d%d", columns, rows, cell, pivotX, pivotY, flipX ? 1 : 0, flipY ? 1 : 0);
+    auto found = m_sprites.find(image + key);
+    if (found != m_sprites.end()) return found->second;
+    SpriteEntry& s = m_sprites[image + key];
+    ImageEntry& img = m_images[image];
+    if (!img.width && img.error.empty()) {
+        std::ifstream in(pathOf(resolve(image)), std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        int w = 0, h = 0, comp = 0;
+        stbi_uc* pixels = bytes.empty() ? nullptr
+                                        : stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h, &comp, 4);
+        if (!pixels) {
+            img.error = in ? std::string("image: ") + stbi_failure_reason() : "cannot open " + image;
+        } else {
+            TextureImage t;
+            t.width = static_cast<u32>(w);
+            t.height = static_cast<u32>(h);
+            t.rgba.assign(pixels, pixels + static_cast<size_t>(w) * h * 4);
+            stbi_image_free(pixels);
+            mkrhi::TextureInit init;
+            const std::vector<u8> mips = buildMips(t, init.mipLevels);
+            init.width = t.width;
+            init.height = t.height;
+            init.format = mkrhi::Format::Rgba8Srgb;
+            init.data = mips.data();
+            MaterialData m;
+            m.baseColorTexture = m_renderer->createTexture(init);
+            m.alphaCutoff = 0.5f;
+            img.material = m_renderer->createMaterial(m);
+            img.width = t.width;
+            img.height = t.height;
+        }
+    }
+    if (!img.error.empty()) {
+        s.error = img.error;
+        return s;
+    }
+    s.cellWidth = img.width / static_cast<u32>(columns);
+    s.cellHeight = img.height / static_cast<u32>(rows);
+    const int col = cell % columns, row = cell / columns;
+    f32 u0 = static_cast<f32>(col) / columns, u1 = static_cast<f32>(col + 1) / columns;
+    f32 v0 = static_cast<f32>(row) / rows, v1 = static_cast<f32>(row + 1) / rows; // v0 = top
+    if (flipX) std::swap(u0, u1);
+    if (flipY) std::swap(v0, v1);
+    const f32 x0 = -pivotX, x1 = 1.0f - pivotX, y0 = -pivotY, y1 = 1.0f - pivotY;
+    MeshData mesh;
+    const auto vertex = [&](f32 x, f32 y, f32 u, f32 v) {
+        Vertex vx;
+        vx.position = {x, y, 0.0f};
+        vx.normal = {0.0f, 0.0f, -1.0f};
+        vx.uv = packHalf2(u, v);
+        vx.material = static_cast<u16>(img.material);
+        mesh.vertices.push_back(vx);
+    };
+    vertex(x0, y0, u0, v1); // bottom left
+    vertex(x1, y0, u1, v1);
+    vertex(x1, y1, u1, v0);
+    vertex(x0, y1, u0, v0);
+    mesh.indices = {0, 2, 1, 0, 3, 2}; // front face toward -z
+    s.mesh = m_renderer->createMesh(mesh);
+    return s;
+}
+
+const ScatterEntry& Assets::scatter(const std::string& file) {
+    ScatterFile& f = m_scatters[file];
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(pathOf(resolve(file)), ec);
+    const long long time = ec ? -1 : static_cast<long long>(t.time_since_epoch().count());
+    if (time == f.time && (time != 0)) return f.entry;
+    f.time = time;
+    f.entry = {};
+    if (time == -1) {
+        f.entry.error = "cannot open " + file;
+        return f.entry;
+    }
+    std::ifstream in(pathOf(resolve(file)), std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+        ScatterItem item;
+        if (std::sscanf(line.c_str(), " i %f %f %f %f %f", &item.position.x, &item.position.y, &item.position.z, &item.yaw, &item.scale) == 5)
+            f.entry.items.push_back(item);
+    }
+    return f.entry;
 }
 
 MeshId Assets::terrain(u32 entityId, const std::string& heightmap, Vec3 size, std::string* error) {

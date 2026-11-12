@@ -22,6 +22,9 @@ namespace {
 constexpr f32 kPi = 3.14159265358979f;
 constexpr f32 kDeg = kPi / 180.0f;
 constexpr const char* kDragEntity = "MKR_ENTITY";
+constexpr const char* kDragAsset = "MKR_ASSET";
+
+Quat conjugate(Quat q) { return {-q.x, -q.y, -q.z, q.w}; }
 
 std::filesystem::path pathOf(const std::string& utf8) { return std::filesystem::path(std::u8string(utf8.begin(), utf8.end())); }
 std::string utf8Of(const std::filesystem::path& p) {
@@ -131,8 +134,13 @@ bool inputString(const char* label, std::string& value) {
 // Label on the left, widget filling the rest (names don't get cut off like with ImGui's right-hand labels)
 void row(const char* label) {
     ImGui::AlignTextToFramePadding();
+    const f32 width = ImGui::GetFontSize() * 7.5f - ImGui::GetStyle().ItemSpacing.x;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImGui::PushClipRect(at, {at.x + width, at.y + ImGui::GetFrameHeight()}, true);
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.0f + ImGui::GetFontSize() * 7.5f);
+    ImGui::PopClipRect();
+    if (ImGui::CalcTextSize(label).x > width) ImGui::SetItemTooltip("%s", label); // cut off: the whole name on hover
+    ImGui::SameLine(ImGui::GetFontSize() * 7.5f);
     ImGui::SetNextItemWidth(-1.0f);
 }
 
@@ -161,6 +169,7 @@ bool App::init(void* sdlWindow, Renderer& renderer) {
     m_window = sdlWindow;
     m_renderer = &renderer;
     m_assets.init(renderer);
+    loadPrefs();
     newScene();
     return true;
 }
@@ -271,6 +280,9 @@ bool App::loadScenePath(const std::string& path) {
     m_externalChange = false;
     m_warnings = warnings;
     m_selected = 0;
+    m_autosaveAt = m_time + m_autosaveMinutes * 60.0;
+    loadViewState();
+    addRecent(path);
     log("Opened " + path + " (" + std::to_string(m_scene.entities.size()) + " objects)");
     for (const std::string& w : warnings) log("  " + w);
     // Look at everything drawn
@@ -297,6 +309,9 @@ void App::newScene() {
     m_redo.clear();
     m_warnings.clear();
     m_selected = 0;
+    m_hidden.clear();
+    m_locked.clear();
+    for (Bookmark& b : m_bookmarks) b = {};
     m_pivot = {};
     m_distance = 12.0f;
 }
@@ -314,6 +329,9 @@ bool App::save() {
     m_savedText = writeScene(m_scene);
     m_fileTime = fileTime(m_path);
     m_externalChange = false;
+    m_autosaveAt = m_time + m_autosaveMinutes * 60.0;
+    addRecent(m_path);
+    saveViewState();
     log("Saved " + m_path);
     return true;
 }
@@ -453,26 +471,302 @@ Entity& App::addEntity(const std::string& kind) {
 }
 
 void App::duplicateSelected() {
-    if (!m_scene.find(m_selected)) return;
-    const std::vector<u32> ids = subtree(m_scene, m_selected);
-    std::map<u32, u32> remap;
-    for (u32 id : ids) remap[id] = m_scene.nextId++;
-    std::vector<Entity> copies;
-    for (u32 id : ids) {
-        Entity e = *m_scene.find(id);
-        e.id = remap[id];
-        if (id != m_selected) e.parent = remap[e.parent];
-        copies.push_back(std::move(e));
+    const std::vector<u32> roots = selectedRoots();
+    if (roots.empty()) return;
+    std::vector<u32> newRoots;
+    for (u32 root : roots) {
+        const std::vector<u32> ids = subtree(m_scene, root);
+        std::map<u32, u32> remap;
+        for (u32 id : ids) remap[id] = m_scene.nextId++;
+        std::vector<Entity> copies;
+        for (u32 id : ids) {
+            Entity e = *m_scene.find(id);
+            e.id = remap[id];
+            if (id != root) e.parent = remap[e.parent];
+            copies.push_back(std::move(e));
+        }
+        for (Entity& e : copies) m_scene.entities.push_back(std::move(e));
+        newRoots.push_back(remap[root]);
     }
-    for (Entity& e : copies) m_scene.entities.push_back(std::move(e));
-    m_selected = remap[m_selected];
+    m_selection = newRoots;
+    m_selected = newRoots.back();
 }
 
 void App::deleteSelected() {
-    if (!m_scene.find(m_selected)) return;
-    const std::vector<u32> ids = subtree(m_scene, m_selected);
+    std::vector<u32> ids;
+    for (u32 root : selectedRoots())
+        for (u32 id : subtree(m_scene, root)) ids.push_back(id);
+    if (ids.empty()) return;
     std::erase_if(m_scene.entities, [&](const Entity& e) { return std::find(ids.begin(), ids.end(), e.id) != ids.end(); });
     m_selected = 0;
+    m_selection.clear();
+}
+
+bool App::isSelected(u32 id) const { return std::find(m_selection.begin(), m_selection.end(), id) != m_selection.end(); }
+
+void App::clickSelect(u32 id, bool toggle) {
+    if (!toggle) {
+        m_selected = id;
+        m_selection.clear();
+        if (id) m_selection.push_back(id);
+        return;
+    }
+    if (!id) return;
+    if (isSelected(id)) {
+        std::erase(m_selection, id);
+        m_selected = m_selection.empty() ? 0 : m_selection.back();
+    } else {
+        m_selection.push_back(id);
+        m_selected = id;
+    }
+}
+
+// Code that sets m_selected alone selects just that object
+void App::syncSelection() {
+    std::erase_if(m_selection, [&](u32 id) { return !m_scene.find(id); });
+    if (!m_scene.find(m_selected)) m_selected = m_selection.empty() ? 0 : m_selection.back();
+    if (!m_selected) m_selection.clear();
+    else if (!isSelected(m_selected)) m_selection = {m_selected};
+}
+
+std::vector<u32> App::selectedRoots() const {
+    std::vector<u32> roots;
+    for (u32 id : m_selection) {
+        bool under = false;
+        for (u32 other : m_selection) under |= other != id && isDescendant(m_scene, id, other);
+        if (!under && m_scene.find(id)) roots.push_back(id);
+    }
+    return roots;
+}
+
+bool App::worldBox(const Entity& e, Vec3& lo, Vec3& hi) {
+    const Transform w = worldTransform(m_scene, e);
+    Vec3 blo, bhi;
+    if (!entityBounds(e, blo, bhi)) {
+        lo = hi = w.position;
+        return false;
+    }
+    const Quat r = e.is(kKindTerrain) ? Quat{} : w.rotation;
+    lo = {1e30f, 1e30f, 1e30f};
+    hi = {-1e30f, -1e30f, -1e30f};
+    for (int i = 0; i < 8; ++i) {
+        const Vec3 l{(i & 1) ? bhi.x : blo.x, (i & 2) ? bhi.y : blo.y, (i & 4) ? bhi.z : blo.z};
+        const Vec3 p = w.position + rotate(r, {l.x * w.scale.x, l.y * w.scale.y, l.z * w.scale.z});
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+    }
+    return true;
+}
+
+namespace {
+void moveWorld(const Scene& scene, Entity& e, Vec3 delta) {
+    Transform w = worldTransform(scene, e);
+    w.position += delta;
+    setWorldTransform(scene, e, w);
+}
+} // namespace
+
+void App::alignSelection(int axis, int mode) {
+    const std::vector<u32> roots = selectedRoots();
+    Entity* primary = m_scene.find(m_selected);
+    if (roots.size() < 2 || !primary) return;
+    Vec3 plo, phi;
+    worldBox(*primary, plo, phi);
+    const auto value = [&](Vec3 lo, Vec3 hi) { return mode == 0 ? (&lo.x)[axis] : mode == 2 ? (&hi.x)[axis] : ((&lo.x)[axis] + (&hi.x)[axis]) * 0.5f; };
+    const f32 target = value(plo, phi);
+    for (u32 id : roots) {
+        Entity* e = m_scene.find(id);
+        if (!e || id == m_selected) continue;
+        Vec3 lo, hi;
+        worldBox(*e, lo, hi);
+        Vec3 delta{};
+        (&delta.x)[axis] = target - value(lo, hi);
+        moveWorld(m_scene, *e, delta);
+    }
+}
+
+void App::distributeSelection(int axis) {
+    std::vector<std::pair<f32, u32>> order;
+    for (u32 id : selectedRoots()) {
+        Vec3 lo, hi;
+        worldBox(*m_scene.find(id), lo, hi);
+        order.push_back({((&lo.x)[axis] + (&hi.x)[axis]) * 0.5f, id});
+    }
+    if (order.size() < 3) return;
+    std::sort(order.begin(), order.end());
+    const f32 first = order.front().first, step = (order.back().first - first) / static_cast<f32>(order.size() - 1);
+    for (size_t i = 1; i + 1 < order.size(); ++i) {
+        Vec3 delta{};
+        (&delta.x)[axis] = first + step * static_cast<f32>(i) - order[i].first;
+        moveWorld(m_scene, *m_scene.find(order[i].second), delta);
+    }
+}
+
+// Each selected object down onto the highest box top below it (objects that aren't selected, hidden, markers or areas), else y = 0
+void App::dropToFloor() {
+    const std::vector<u32> roots = selectedRoots();
+    for (u32 id : roots) {
+        Entity* e = m_scene.find(id);
+        if (!e) continue;
+        Vec3 lo, hi;
+        worldBox(*e, lo, hi);
+        f32 floor = 0.0f;
+        bool found = false;
+        for (const Entity& o : m_scene.entities) {
+            if (isSelected(o.id) || m_hidden.count(o.id) || isMarker(o) || isArea(o) || o.is(kKindScatter) || isDescendant(m_scene, o.id, id)) continue;
+            Vec3 olo, ohi;
+            if (!worldBox(o, olo, ohi)) continue;
+            if (ohi.x < lo.x || olo.x > hi.x || ohi.z < lo.z || olo.z > hi.z || ohi.y > lo.y + 0.01f) continue;
+            if (!found || ohi.y > floor) floor = ohi.y, found = true;
+        }
+        if (!found && lo.y < 0.0f) continue; // already below the floor: leave it
+        moveWorld(m_scene, *e, {0.0f, floor - lo.y, 0.0f});
+    }
+}
+
+// ---------------------------------------------------------------- View state, preferences, autosave
+
+std::string App::viewStatePath() const {
+    if (m_project.empty() || m_path.empty()) return {};
+    return utf8Of(pathOf(m_project) / "build" / "editor" / (utf8Of(pathOf(m_path).stem()) + ".view"));
+}
+
+// The MealKit editor's format: "hidden 3 5" / "locked 7" + "camera <1~9> x y z yaw pitch"
+void App::loadViewState() {
+    m_hidden.clear();
+    m_locked.clear();
+    for (Bookmark& b : m_bookmarks) b = {};
+    const std::string path = viewStatePath();
+    if (path.empty()) return;
+    std::ifstream in(pathOf(path));
+    std::string line;
+    while (std::getline(in, line)) {
+        int slot = 0;
+        Bookmark b;
+        if (std::sscanf(line.c_str(), "camera %d %f %f %f %f %f", &slot, &b.position.x, &b.position.y, &b.position.z, &b.yaw, &b.pitch) == 6 &&
+            slot >= 1 && slot <= 9) {
+            b.set = true;
+            m_bookmarks[slot - 1] = b;
+            continue;
+        }
+        std::set<u32>* set = line.rfind("hidden", 0) == 0 ? &m_hidden : line.rfind("locked", 0) == 0 ? &m_locked : nullptr;
+        if (!set) continue;
+        std::istringstream ids(line.substr(6));
+        for (u32 id; ids >> id;)
+            if (id) set->insert(id);
+    }
+}
+
+void App::saveViewState() const {
+    const std::string path = viewStatePath();
+    if (path.empty()) return;
+    std::string text;
+    for (auto [name, set] : {std::pair{"hidden", &m_hidden}, std::pair{"locked", &m_locked}}) {
+        text += name;
+        for (u32 id : *set) text += " " + std::to_string(id);
+        text += "\n";
+    }
+    for (int i = 0; i < 9; ++i) {
+        const Bookmark& b = m_bookmarks[i];
+        if (!b.set) continue;
+        char line[160];
+        std::snprintf(line, sizeof(line), "camera %d %.3f %.3f %.3f %.4f %.4f\n", i + 1, b.position.x, b.position.y, b.position.z, b.yaw, b.pitch);
+        text += line;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(pathOf(path).parent_path(), ec);
+    std::ofstream(pathOf(path), std::ios::binary) << text;
+}
+
+void App::setHidden(const std::vector<u32>& ids, bool hidden) {
+    for (u32 id : ids) {
+        if (hidden) m_hidden.insert(id);
+        else m_hidden.erase(id);
+    }
+    saveViewState();
+}
+
+void App::setLocked(const std::vector<u32>& ids, bool locked) {
+    for (u32 id : ids) {
+        if (locked) m_locked.insert(id);
+        else m_locked.erase(id);
+    }
+    saveViewState();
+}
+
+namespace {
+std::string prefsFile() {
+    char* dir = SDL_GetPrefPath("MealKit", "MkRender");
+    if (!dir) return {};
+    std::string path = std::string(dir) + "settings.txt";
+    SDL_free(dir);
+    return path;
+}
+} // namespace
+
+void App::loadPrefs() {
+    const std::string path = prefsFile();
+    if (path.empty()) return;
+    std::ifstream in(pathOf(path));
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t sp = line.find(' ');
+        if (sp == std::string::npos) continue;
+        const std::string key = line.substr(0, sp), value = line.substr(sp + 1);
+        f32 v = 0.0f;
+        const bool number = parseFloat(value, v);
+        if (key == "recent") m_recent.push_back(value);
+        else if (key == "grid") m_showGrid = value == "true";
+        else if (key == "alwaysSnap") m_alwaysSnap = value == "true";
+        else if (key == "markers") m_showMarkers = value != "false";
+        else if (number && key == "gridStep") m_gridStep = std::max(v, 0.01f);
+        else if (number && key == "snapMove") m_snapMove = std::max(v, 0.001f);
+        else if (number && key == "snapRotate") m_snapRotate = std::max(v, 0.1f);
+        else if (number && key == "snapScale") m_snapScale = std::max(v, 0.001f);
+        else if (number && key == "autosaveMinutes") m_autosaveMinutes = std::max(v, 0.0f);
+    }
+}
+
+void App::savePrefs() const {
+    const std::string path = prefsFile();
+    if (path.empty()) return;
+    std::ofstream out(pathOf(path), std::ios::binary);
+    out << "# MkRender preferences\n";
+    out << "grid " << (m_showGrid ? "true" : "false") << "\ngridStep " << floatText(m_gridStep) << "\nalwaysSnap " << (m_alwaysSnap ? "true" : "false")
+        << "\nmarkers " << (m_showMarkers ? "true" : "false") << "\nsnapMove " << floatText(m_snapMove) << "\nsnapRotate " << floatText(m_snapRotate)
+        << "\nsnapScale " << floatText(m_snapScale) << "\nautosaveMinutes " << floatText(m_autosaveMinutes) << "\n";
+    for (const std::string& r : m_recent) out << "recent " << r << "\n";
+}
+
+void App::addRecent(const std::string& path) {
+    std::error_code ec;
+    const std::string full = utf8Of(std::filesystem::absolute(pathOf(path), ec).lexically_normal());
+    std::erase_if(m_recent, [&](const std::string& r) { return lower(r) == lower(full); });
+    m_recent.insert(m_recent.begin(), full);
+    if (m_recent.size() > 12) m_recent.resize(12);
+    savePrefs();
+}
+
+// The unsaved scene every few minutes, next to the editor's files (never over the scene itself)
+std::string App::autosavePath() const {
+    const std::string name = (m_path.empty() ? std::string("untitled") : utf8Of(pathOf(m_path).stem())) + ".scene";
+    if (!m_project.empty()) return utf8Of(pathOf(m_project) / "build" / "editor" / "autosave" / name);
+    const std::string prefs = prefsFile();
+    return prefs.empty() ? std::string() : utf8Of(pathOf(prefs).parent_path() / "autosave" / name);
+}
+
+void App::autosave() {
+    if (m_autosaveMinutes <= 0.0f || m_time < m_autosaveAt) return;
+    m_autosaveAt = m_time + m_autosaveMinutes * 60.0;
+    if (!dirty()) return;
+    const std::string path = autosavePath();
+    if (path.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(pathOf(path).parent_path(), ec);
+    std::string error;
+    if (saveScene(path, m_scene, error)) m_status = "Autosaved to " + path, m_statusTime = m_time;
+    else log("Autosave failed: " + error);
 }
 
 void App::reparent(u32 id, u32 parent) {
@@ -540,6 +834,15 @@ bool App::entityBounds(const Entity& e, Vec3& lo, Vec3& hi) {
     if (isMarker(e) || e.is(kKindScatter)) return false;
     lo = {-0.5f, -0.5f, -0.5f};
     hi = {0.5f, 0.5f, 0.5f};
+    if (e.is(kKindSprite)) {
+        f32 px = 0.5f, py = 0.5f;
+        parseFloat(e.field("pivotX"), px);
+        parseFloat(e.field("pivotY"), py);
+        const Vec3 k = spriteSize(e);
+        lo = {-px * k.x, -py * k.y, -0.02f};
+        hi = {(1.0f - px) * k.x, (1.0f - py) * k.y, 0.02f};
+        return true;
+    }
     if (!e.model.empty() && !isArea(e) && !e.is(kKindTerrain) && !e.is(kKindSprite)) {
         const ModelEntry& m = m_assets.model(e.model);
         if (m.ok) {
@@ -550,17 +853,54 @@ bool App::entityBounds(const Entity& e, Vec3& lo, Vec3& hi) {
     return true;
 }
 
-u32 App::pick(f32 mx, f32 my) {
+void App::mouseRay(f32 mx, f32 my, Vec3& eye, Vec3& dir) const {
     const f32 nx = (mx - m_uiX) / m_uiW * 2.0f - 1.0f, ny = 1.0f - (my - m_uiY) / m_uiH * 2.0f;
     const Vec3 forward = cameraForward();
     const Vec3 right = normalize(cross({0, 1, 0}, forward));
     const Vec3 up = cross(forward, right);
     const f32 t = std::tan(m_fov * kDeg * 0.5f);
-    const Vec3 dir = normalize(forward + right * (nx * t * m_uiW / m_uiH) + up * (ny * t));
-    const Vec3 eye = cameraEye();
+    dir = normalize(forward + right * (nx * t * m_uiW / m_uiH) + up * (ny * t));
+    eye = cameraEye();
+}
+
+bool App::groundPoint(f32 mx, f32 my, Vec3& out) {
+    Vec3 eye, dir;
+    mouseRay(mx, my, eye, dir);
+    f32 dist = 0.0f;
+    const u32 hit = pick(mx, my, &dist);
+    const Entity* e = m_scene.find(hit);
+    if (e && !isMarker(*e) && !isArea(*e) && !e->is(kKindScatter)) {
+        out = eye + dir * dist;
+        return true;
+    }
+    if (dir.y < -1e-4f) {
+        out = eye + dir * (-eye.y / dir.y);
+        return true;
+    }
+    out = m_pivot;
+    return false;
+}
+
+Vec3 App::spriteSize(const Entity& e) {
+    f32 ppu = 0.0f;
+    parseFloat(e.field("pixelsPerUnit"), ppu);
+    if (ppu <= 0.0f) return {1, 1, 1};
+    f32 columns = 1, rows = 1, cell = 0;
+    parseFloat(e.field("columns"), columns);
+    parseFloat(e.field("rows"), rows);
+    parseFloat(e.field("cell"), cell);
+    const SpriteEntry& s = m_assets.sprite(e.field("image"), static_cast<int>(columns), static_cast<int>(rows), static_cast<int>(cell), 0.5f, 0.5f, false, false);
+    if (!s.cellWidth) return {1, 1, 1};
+    return {s.cellWidth / ppu, s.cellHeight / ppu, 1};
+}
+
+u32 App::pick(f32 mx, f32 my, f32* hitDistance) {
+    Vec3 eye, dir;
+    mouseRay(mx, my, eye, dir);
     u32 best = 0;
     f32 bestT = 1e30f;
     for (const Entity& e : m_scene.entities) {
+        if (m_hidden.count(e.id) || m_locked.count(e.id)) continue;
         const Transform w = worldTransform(m_scene, e);
         if (isMarker(e) || e.is(kKindScatter)) {
             if (!m_showMarkers) continue;
@@ -602,6 +942,7 @@ u32 App::pick(f32 mx, f32 my) {
         const f32 dist = length(hitWorld - eye);
         if (dist < bestT) bestT = dist, best = e.id;
     }
+    if (hitDistance) *hitDistance = bestT;
     return best;
 }
 
@@ -640,7 +981,58 @@ FrameParams App::frameParams() const {
 void App::fill(DrawList& list) {
     m_lights.clear();
     for (const Entity& e : m_scene.entities) {
+        if (m_hidden.count(e.id)) continue;
         const Transform w = worldTransform(m_scene, e);
+        if (e.is(kKindSprite)) {
+            f32 columns = 1, rows = 1, cell = 0, px = 0.5f, py = 0.5f;
+            parseFloat(e.field("columns"), columns);
+            parseFloat(e.field("rows"), rows);
+            parseFloat(e.field("cell"), cell);
+            parseFloat(e.field("pivotX"), px);
+            parseFloat(e.field("pivotY"), py);
+            if (e.field("image").empty()) continue;
+            const SpriteEntry& s = m_assets.sprite(e.field("image"), static_cast<int>(columns), static_cast<int>(rows), static_cast<int>(cell), px, py,
+                                                   e.field("flipX") == "true", e.field("flipY") == "true");
+            if (s.mesh == kNoMesh) {
+                if (std::find(m_modelProblems.begin(), m_modelProblems.end(), s.error) == m_modelProblems.end()) {
+                    m_modelProblems.push_back(s.error);
+                    log("Sprite " + e.name + ": " + s.error);
+                }
+                continue;
+            }
+            const Vec3 k = spriteSize(e);
+            InstanceData inst;
+            inst.color = e.color;
+            inst.flags = isSelected(e.id) ? kInstanceHighlight : 0u;
+            inst.position = w.position;
+            inst.rotation = w.rotation;
+            inst.scale = {w.scale.x * k.x, w.scale.y * k.y, 1.0f};
+            list.add(s.mesh, inst);
+            continue;
+        }
+        if (e.is(kKindScatter)) {
+            const std::string model = e.field("model"), file = e.field("file");
+            if (model.empty() || file.empty()) continue;
+            const ModelEntry& m = m_assets.model(model);
+            const ScatterEntry& sc = m_assets.scatter(file);
+            if (!m.ok || !sc.error.empty()) {
+                const std::string problem = !m.ok ? model + ": " + m.error : sc.error;
+                if (std::find(m_modelProblems.begin(), m_modelProblems.end(), problem) == m_modelProblems.end()) {
+                    m_modelProblems.push_back(problem);
+                    log("Scatter " + e.name + ": " + problem);
+                }
+                continue;
+            }
+            for (const ScatterItem& item : sc.items) {
+                InstanceData inst;
+                inst.position = item.position;
+                inst.rotation = axisAngle({0, 1, 0}, item.yaw);
+                inst.scale = {item.scale, item.scale, item.scale};
+                inst.color = 0xFFFFFFFF;
+                list.add(m.mesh, inst);
+            }
+            continue;
+        }
         if (e.is(kKindPointLight)) {
             u8 c[4] = {255, 214, 160, 255};
             parseColorText(e.field("color"), c);
@@ -658,7 +1050,7 @@ void App::fill(DrawList& list) {
         InstanceData inst;
         inst.color = e.color;
         inst.flags = e.flags & ~kInstanceHighlight;
-        if (e.id == m_selected) inst.flags |= kInstanceHighlight;
+        if (isSelected(e.id)) inst.flags |= kInstanceHighlight;
         if (e.is(kKindTerrain)) {
             std::string error;
             const MeshId mesh = m_assets.terrain(e.id, e.field("heightmap"), w.scale, &error);
@@ -697,13 +1089,18 @@ void App::frame(f64 dt) {
     m_time += dt;
     m_fps = m_fps <= 0.0f ? 60.0f : m_fps * 0.95f + 0.05f / static_cast<f32>(std::max(dt, 1e-4));
     ImGuizmo::BeginFrame();
+    syncSelection();
     checkExternalChange();
+    autosave();
     if (!m_project.empty() && fileTime(kindsPath()) != m_kindsTime) reloadKinds();
 
     const ImGuiID dockspace = ImGui::GetID("MkRenderDock");
     if (!m_layoutDone) {
         m_layoutDone = true;
-        if (!ImGui::DockBuilderGetNode(dockspace) || !ImGui::FindWindowSettingsByID(ImHashStr("Hierarchy"))) layoutDocks(dockspace);
+        const ImGuiWindowSettings* assets = ImGui::FindWindowSettingsByID(ImHashStr("Assets"));
+        const bool assetsDocked = assets && assets->DockId != 0; // layouts saved before the Assets window existed
+        if (!ImGui::DockBuilderGetNode(dockspace) || !ImGui::FindWindowSettingsByID(ImHashStr("Hierarchy")) || !assetsDocked)
+            layoutDocks(dockspace);
     }
     drawMenu();
     ImGui::DockSpaceOverViewport(dockspace, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
@@ -719,6 +1116,7 @@ void App::frame(f64 dt) {
         m_view.height = std::min(m_view.height, static_cast<f32>(m_renderer->height()) - m_view.y);
     }
     drawHierarchy();
+    drawAssets();
     drawInspector();
     drawEnvironment();
     drawStats();
@@ -748,6 +1146,7 @@ void App::layoutDocks(unsigned dockspace) {
     const ImGuiID leftBottom = ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.3f, nullptr, &left);
     ImGui::DockBuilderDockWindow("Hierarchy", left);
     ImGui::DockBuilderDockWindow("Stats", leftBottom);
+    ImGui::DockBuilderDockWindow("Assets", leftBottom);
     ImGui::DockBuilderDockWindow("Inspector", right);
     ImGui::DockBuilderDockWindow("Environment", right);
     ImGui::DockBuilderFinish(dockspace);
@@ -772,6 +1171,11 @@ void App::drawMenu() {
             if (ImGui::MenuItem("New scene", "Ctrl+N")) guarded(Pending::NewScene);
             if (ImGui::MenuItem("Open project...")) openProjectDialog();
             if (ImGui::MenuItem("Open scene...", "Ctrl+O")) openSceneDialog();
+            if (ImGui::BeginMenu("Recent scenes", !m_recent.empty())) {
+                for (const std::string& r : m_recent)
+                    if (ImGui::MenuItem(r.c_str(), nullptr, r == m_path)) guarded(Pending::OpenPath, r);
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("Project scenes", !m_assets.assetsDir().empty())) {
                 for (const std::string& s : m_assets.files(".scene"))
                     if (ImGui::MenuItem(s.c_str(), nullptr, m_assets.resolve(s) == m_path)) guarded(Pending::OpenPath, m_assets.resolve(s));
@@ -781,6 +1185,22 @@ void App::drawMenu() {
             if (ImGui::MenuItem("Save", "Ctrl+S")) save();
             if (ImGui::MenuItem("Save as...")) saveAs();
             if (ImGui::MenuItem("Reload from disk", nullptr, false, !m_path.empty())) reloadFromDisk();
+            {
+                std::error_code ec;
+                const std::string backup = autosavePath();
+                if (ImGui::MenuItem("Recover autosave", nullptr, false, !backup.empty() && std::filesystem::is_regular_file(pathOf(backup), ec))) {
+                    Scene scene;
+                    std::string error;
+                    if (loadScene(backup, scene, error, nullptr)) {
+                        snapshot();
+                        m_scene = std::move(scene);
+                        log("Recovered " + backup + " (not saved yet)");
+                    } else {
+                        log("Cannot read " + backup + ": " + error);
+                    }
+                }
+                ImGui::SetItemTooltip("Replace the scene with its last autosave (build/editor/autosave); undo goes back");
+            }
             if (ImGui::MenuItem("Reload models")) {
                 m_assets.reloadAll();
                 m_modelProblems.clear();
@@ -808,6 +1228,40 @@ void App::drawMenu() {
             }
             if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, m_selected != 0)) duplicateSelected();
             if (ImGui::MenuItem("Delete", "Del", false, m_selected != 0)) deleteSelected();
+            if (ImGui::MenuItem("Select all", "Ctrl+A")) {
+                m_selection.clear();
+                for (const Entity& e : m_scene.entities)
+                    if (!m_hidden.count(e.id) && !m_locked.count(e.id)) m_selection.push_back(e.id);
+                m_selected = m_selection.empty() ? 0 : m_selection.back();
+            }
+            ImGui::Separator();
+            if (ImGui::BeginMenu("Arrange", m_selection.size() >= 2)) {
+                static const char* axes[] = {"X", "Y", "Z"};
+                for (int a = 0; a < 3; ++a) {
+                    if (ImGui::MenuItem((std::string("Align min ") + axes[a]).c_str())) alignSelection(a, 0);
+                    if (ImGui::MenuItem((std::string("Align center ") + axes[a]).c_str())) alignSelection(a, 1);
+                    if (ImGui::MenuItem((std::string("Align max ") + axes[a]).c_str())) alignSelection(a, 2);
+                }
+                ImGui::Separator();
+                for (int a = 0; a < 3; ++a)
+                    if (ImGui::MenuItem((std::string("Distribute ") + axes[a]).c_str(), nullptr, false, m_selection.size() >= 3)) distributeSelection(a);
+                ImGui::TextDisabled("Aligns to the last selected object");
+                ImGui::EndMenu();
+            }
+            if (ImGui::MenuItem("Drop to floor", "End", false, m_selected != 0)) dropToFloor();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Hide", "H", false, m_selected != 0)) setHidden(m_selection, true);
+            if (ImGui::MenuItem("Show all", "Shift+H", false, !m_hidden.empty())) {
+                m_hidden.clear();
+                saveViewState();
+            }
+            if (ImGui::MenuItem("Lock", nullptr, false, m_selected != 0)) setLocked(m_selection, true);
+            if (ImGui::MenuItem("Unlock all", nullptr, false, !m_locked.empty())) {
+                m_locked.clear();
+                saveViewState();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save selection as prefab...", nullptr, false, m_selected != 0 && !m_assets.assetsDir().empty())) m_prefabPopup = true;
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
@@ -816,7 +1270,38 @@ void App::drawMenu() {
             if (ImGui::MenuItem("Rotate", "E", m_gizmo == Gizmo::Rotate)) m_gizmo = Gizmo::Rotate;
             if (ImGui::MenuItem("Scale", "R", m_gizmo == Gizmo::Scale)) m_gizmo = Gizmo::Scale;
             ImGui::MenuItem("Local axes", nullptr, &m_gizmoLocal);
-            ImGui::MenuItem("Markers and areas", nullptr, &m_showMarkers);
+            if (ImGui::MenuItem("Markers and areas", nullptr, &m_showMarkers)) savePrefs();
+            if (ImGui::MenuItem("Grid", "G", &m_showGrid)) savePrefs();
+            if (ImGui::BeginMenu("Grid and snap")) {
+                bool changed = ImGui::MenuItem("Always snap (Ctrl turns it off)", nullptr, &m_alwaysSnap);
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+                changed |= ImGui::DragFloat("Grid step (m)", &m_gridStep, 0.05f, 0.05f, 100.0f, "%.2f");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+                changed |= ImGui::DragFloat("Move step (m)", &m_snapMove, 0.05f, 0.01f, 100.0f, "%.2f");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+                changed |= ImGui::DragFloat("Rotate step (deg)", &m_snapRotate, 0.5f, 1.0f, 90.0f, "%.1f");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+                changed |= ImGui::DragFloat("Scale step", &m_snapScale, 0.01f, 0.01f, 10.0f, "%.2f");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+                changed |= ImGui::DragFloat("Autosave (min, 0 off)", &m_autosaveMinutes, 0.1f, 0.0f, 60.0f, "%.1f");
+                if (changed) savePrefs();
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Camera bookmarks")) {
+                for (int i = 0; i < 9; ++i) {
+                    char label[32];
+                    std::snprintf(label, sizeof(label), "Go to %d", i + 1);
+                    char key[8];
+                    std::snprintf(key, sizeof(key), "%d", i + 1);
+                    if (ImGui::MenuItem(label, key, false, m_bookmarks[i].set)) {
+                        m_yaw = m_bookmarks[i].yaw;
+                        m_pitch = -m_bookmarks[i].pitch;
+                        m_pivot = m_bookmarks[i].position + cameraForward() * m_distance;
+                    }
+                }
+                ImGui::TextDisabled("Ctrl+1..9 saves the current view (shared with the editor)");
+                ImGui::EndMenu();
+            }
             int model = static_cast<int>(m_lighting);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
             if (ImGui::Combo("Lighting model", &model, "PBR\0Toon\0Unlit\0")) setLightingModel(static_cast<LightingModel>(model));
@@ -845,7 +1330,40 @@ void App::drawMenu() {
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)) undo(true);
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D)) duplicateSelected();
         if (ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelected();
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
+            m_selection.clear();
+            for (const Entity& e : m_scene.entities)
+                if (!m_hidden.count(e.id) && !m_locked.count(e.id)) m_selection.push_back(e.id);
+            m_selected = m_selection.empty() ? 0 : m_selection.back();
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_End)) dropToFloor();
+        for (int i = 0; i < 9 && !io.KeyAlt && !io.KeyShift && !ImGui::IsMouseDown(ImGuiMouseButton_Right); ++i) {
+            if (!ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + i), false)) continue;
+            Bookmark& b = m_bookmarks[i];
+            if (ctrl) {
+                b = {true, cameraEye(), m_yaw, -m_pitch};
+                saveViewState();
+                log("Camera bookmark " + std::to_string(i + 1) + " saved");
+            } else if (b.set) {
+                m_yaw = b.yaw;
+                m_pitch = std::clamp(-b.pitch, -1.55f, 1.55f);
+                m_pivot = b.position + cameraForward() * m_distance;
+            }
+        }
         if (!ctrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            if (ImGui::IsKeyPressed(ImGuiKey_H)) {
+                if (io.KeyShift) {
+                    m_hidden.clear();
+                    saveViewState();
+                } else if (m_selected) {
+                    setHidden(m_selection, true);
+                    m_selected = 0;
+                }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_G)) {
+                m_showGrid = !m_showGrid;
+                savePrefs();
+            }
             if (ImGui::IsKeyPressed(ImGuiKey_W)) m_gizmo = Gizmo::Translate;
             if (ImGui::IsKeyPressed(ImGuiKey_E)) m_gizmo = Gizmo::Rotate;
             if (ImGui::IsKeyPressed(ImGuiKey_R)) m_gizmo = Gizmo::Scale;
@@ -899,18 +1417,20 @@ void App::drawTreeNode(const Entity& e) {
     for (const Entity& c : m_scene.entities) hasChildren |= c.parent == e.id;
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_OpenOnDoubleClick;
     if (!hasChildren) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-    if (e.id == m_selected) flags |= ImGuiTreeNodeFlags_Selected;
+    if (isSelected(e.id)) flags |= ImGuiTreeNodeFlags_Selected;
     // Keep the selection visible: open the ancestors of the selected object
     if (hasChildren && m_selected && m_selected != e.id && isDescendant(m_scene, m_selected, e.id)) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     ImGui::PushID(static_cast<int>(e.id));
     const bool open = ImGui::TreeNodeEx("##node", flags, "%s", e.name.empty() ? "(unnamed)" : e.name.c_str());
-    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) m_selected = e.id;
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) clickSelect(e.id, ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl);
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         m_selected = e.id;
         frameSelected();
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("%s", e.kind.c_str());
+    const KindInfo* kindInfo = findKind(e.kind);
+    ImGui::TextDisabled("%s%s%s", kindInfo && kindInfo->game ? kindInfo->label.c_str() : e.kind.c_str(), m_hidden.count(e.id) ? "  (hidden)" : "",
+                        m_locked.count(e.id) ? "  (locked)" : "");
     if (ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload(kDragEntity, &e.id, sizeof(u32));
         ImGui::Text("%s", e.name.c_str());
@@ -921,7 +1441,11 @@ void App::drawTreeNode(const Entity& e) {
         ImGui::EndDragDropTarget();
     }
     if (ImGui::BeginPopupContextItem("ctx")) {
-        m_selected = e.id;
+        if (!isSelected(e.id)) clickSelect(e.id, false);
+        const bool hidden = m_hidden.count(e.id) != 0, locked = m_locked.count(e.id) != 0;
+        if (ImGui::MenuItem(hidden ? "Show" : "Hide", "H")) setHidden(m_selection, !hidden);
+        if (ImGui::MenuItem(locked ? "Unlock" : "Lock (not picked in the view)")) setLocked(m_selection, !locked);
+        ImGui::Separator();
         if (ImGui::MenuItem("Duplicate", "Ctrl+D")) duplicateSelected();
         if (ImGui::MenuItem("Delete", "Del")) deleteSelected();
         if (e.parent && ImGui::MenuItem("Move to top level")) reparent(e.id, 0);
@@ -954,7 +1478,7 @@ void App::drawHierarchy() {
                 for (const Entity& e : m_scene.entities) {
                     if (lower(e.name).find(filter) == std::string::npos && lower(e.kind).find(filter) == std::string::npos) continue;
                     ImGui::PushID(static_cast<int>(e.id));
-                    if (ImGui::Selectable(e.name.c_str(), e.id == m_selected)) m_selected = e.id;
+                    if (ImGui::Selectable(e.name.c_str(), isSelected(e.id))) clickSelect(e.id, ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl);
                     ImGui::PopID();
                 }
             } else {
@@ -1011,7 +1535,7 @@ void App::drawFields(Entity& e) {
         ImGui::PushID(static_cast<int>(i));
         const KindField* kf = findKindField(e.kind, key);
         row(kf && !kf->label.empty() ? kf->label.c_str() : key.c_str());
-        if (kf) ImGui::SetItemTooltip("%s (%s)%s", key.c_str(), kf->type.c_str(), kf->view ? ", view only" : "");
+        if (kf) ImGui::SetItemTooltip("%s\n%s (%s)%s", kf->label.c_str(), key.c_str(), kf->type.c_str(), kf->view ? ", view only" : "");
         ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() - ImGui::GetStyle().ItemSpacing.x);
         f32 number = 0.0f;
         u8 color[4];
@@ -1103,11 +1627,14 @@ void App::drawInspector() {
             ImGui::TextDisabled("%zu objects in the scene", m_scene.entities.size());
         } else {
             Entity& e = *found;
+            if (m_selection.size() > 1) ImGui::TextColored({1.0f, 0.8f, 0.4f, 1.0f}, "%zu objects selected (editing the last one; the gizmo moves all)", m_selection.size());
             ImGui::TextDisabled("id %u", e.id);
             row("Name");
             inputString("##name", e.name);
             row("Kind");
-            if (ImGui::BeginCombo("##kind", e.kind.c_str())) {
+            const KindInfo* current = findKind(e.kind);
+            const std::string kindText = current && current->label != e.kind ? current->label + "  (" + e.kind + ")" : e.kind;
+            if (ImGui::BeginCombo("##kind", kindText.c_str())) {
                 for (const KindInfo& k : kinds())
                     if (ImGui::Selectable(k.label.c_str(), e.kind == k.name) && e.kind != k.name) {
                         e.kind = k.name;
@@ -1178,8 +1705,8 @@ void App::drawInspector() {
             bool checker = (e.flags & kInstanceChecker) != 0;
             row("Checker");
             if (ImGui::Checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
-            if (e.is(kKindScatter) || e.is(kKindSprite) || e.is(kKindCamera))
-                ImGui::TextDisabled("Not drawn in MkRender yet (shown as a marker); the fields are saved as they are.");
+            if (e.is(kKindScatter)) ImGui::TextDisabled("Draws the instances of its .scatter file (painting is in the MealKit editor for now).");
+            if (!e.field("anim").empty()) ImGui::TextDisabled("The anim clip isn't played in MkRender (bind pose).");
             if (e.is(kKindTerrain)) ImGui::TextDisabled("The heightmap fills the object's box (scale). Brushes are in the MealKit editor.");
 
             ImGui::SeparatorText("Fields");
@@ -1290,9 +1817,47 @@ void App::drawOverlay() {
         }
     };
     const ImU32 selectedColor = IM_COL32(255, 200, 60, 255);
+    if (m_showGrid) { // lines on y = 0 around the pivot, every grid step, brighter every 10
+        const f32 step = std::max(m_gridStep, 0.01f) * (m_distance > 400.0f * m_gridStep ? 10.0f : 1.0f);
+        const int half = 40;
+        const f32 cx = std::round(m_pivot.x / step) * step, cz = std::round(m_pivot.z / step) * step;
+        for (int i = -half; i <= half; ++i) {
+            const f32 o = static_cast<f32>(i) * step;
+            for (int axis = 0; axis < 2; ++axis) {
+                const bool major = std::llround(((axis ? cx : cz) + o) / step) % 10 == 0;
+                const ImU32 c = major ? IM_COL32(255, 255, 255, 50) : IM_COL32(255, 255, 255, 22);
+                const int segments = 8;
+                for (int s = 0; s < segments; ++s) {
+                    const f32 t0 = -half * step + 2.0f * half * step * s / segments, t1 = -half * step + 2.0f * half * step * (s + 1) / segments;
+                    const Vec3 a = axis ? Vec3{cx + o, 0, cz + t0} : Vec3{cx + t0, 0, cz + o};
+                    const Vec3 b = axis ? Vec3{cx + o, 0, cz + t1} : Vec3{cx + t1, 0, cz + o};
+                    f32 ax, ay, bx, by;
+                    if (project(a, ax, ay) && project(b, bx, by)) dl->AddLine({ax, ay}, {bx, by}, c, 1.0f);
+                }
+            }
+        }
+    }
     for (const Entity& e : m_scene.entities) {
+        if (m_hidden.count(e.id)) continue;
         const Transform w = worldTransform(m_scene, e);
-        const bool selected = e.id == m_selected;
+        const bool selected = isSelected(e.id);
+        if (e.is(kKindCamera) && (m_showMarkers || selected)) { // frustum: looks along +z of the object
+            f32 fov = 0.0f;
+            parseFloat(e.field("fov"), fov);
+            if (fov <= 0.0f) fov = 50.0f;
+            const f32 len = 2.0f, hy = std::tan(fov * kDeg * 0.5f) * len, hx = hy * 16.0f / 9.0f;
+            const Vec3 corners[4] = {{-hx, -hy, len}, {hx, -hy, len}, {hx, hy, len}, {-hx, hy, len}};
+            ImVec2 sc[4];
+            bool ok[4];
+            f32 ox, oy;
+            const bool origin = project(w.position, ox, oy);
+            const ImU32 c = selected ? selectedColor : IM_COL32(150, 220, 150, 170);
+            for (int i = 0; i < 4; ++i) ok[i] = project(w.position + rotate(w.rotation, corners[i]), sc[i].x, sc[i].y);
+            for (int i = 0; i < 4; ++i) {
+                if (ok[i] && origin) dl->AddLine({ox, oy}, sc[i], c, 1.0f);
+                if (ok[i] && ok[(i + 1) % 4]) dl->AddLine(sc[i], sc[(i + 1) % 4], c, 1.0f);
+            }
+        }
         if (isArea(e)) {
             const KindInfo* kindInfo = findKind(e.kind);
             const bool game = !kindInfo || kindInfo->game;
@@ -1303,7 +1868,7 @@ void App::drawOverlay() {
             if ((selected || ImGui::GetIO().KeyAlt) && project(w.position, x, y)) dl->AddText({x, y}, IM_COL32(230, 230, 230, 230), e.name.c_str());
             continue;
         }
-        if (isMarker(e) || e.is(kKindScatter) || e.is(kKindSprite)) {
+        if (isMarker(e) || e.is(kKindScatter) || (e.is(kKindSprite) && e.field("image").empty())) {
             if (!m_showMarkers && !selected) continue;
             f32 x, y;
             if (!project(w.position, x, y)) continue;
@@ -1348,6 +1913,12 @@ void App::drawOverlay() {
             }
         }
     }
+    if (m_boxSelecting) {
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        const ImVec2 lo(std::min(m_clickX, mouse.x), std::min(m_clickY, mouse.y)), hi(std::max(m_clickX, mouse.x), std::max(m_clickY, mouse.y));
+        dl->AddRectFilled(lo, hi, IM_COL32(90, 150, 255, 40));
+        dl->AddRect(lo, hi, IM_COL32(90, 150, 255, 200));
+    }
     dl->PopClipRect();
 }
 
@@ -1360,18 +1931,41 @@ void App::drawGizmo() {
     ImGuizmo::SetRect(m_uiX, m_uiY, m_uiW, m_uiH);
     ImGuizmo::SetGizmoSizeClipSpace(0.13f);
     f32 matrix[16];
-    compose(worldTransform(m_scene, *e), matrix);
+    const Transform before = worldTransform(m_scene, *e);
+    compose(before, matrix);
     ImGuizmo::OPERATION op = m_gizmo == Gizmo::Translate ? ImGuizmo::TRANSLATE : m_gizmo == Gizmo::Rotate ? ImGuizmo::ROTATE : ImGuizmo::SCALE;
     if (isMarker(*e) && op == ImGuizmo::SCALE) op = ImGuizmo::TRANSLATE;
     const ImGuizmo::MODE mode = (m_gizmoLocal || op == ImGuizmo::SCALE) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
-    const f32 step = op == ImGuizmo::TRANSLATE ? 0.5f : op == ImGuizmo::ROTATE ? 15.0f : 0.1f;
+    const f32 step = op == ImGuizmo::TRANSLATE ? m_snapMove : op == ImGuizmo::ROTATE ? m_snapRotate : m_snapScale;
     const f32 snap[3] = {step, step, step};
     const Mat4 view = viewMatrix(), proj = projMatrix();
-    if (ImGuizmo::Manipulate(&view.m[0][0], &proj.m[0][0], op, mode, matrix, nullptr, ImGui::GetIO().KeyCtrl ? snap : nullptr)) {
+    const bool snapping = ImGui::GetIO().KeyCtrl != m_alwaysSnap;
+    if (ImGuizmo::Manipulate(&view.m[0][0], &proj.m[0][0], op, mode, matrix, nullptr, snapping ? snap : nullptr)) {
         Transform world;
         decompose(matrix, world);
         setWorldTransform(m_scene, *e, world);
         m_eulerFor = 0;
+        // The other selected objects follow the primary one
+        const Quat dq = normalizeQuat(mul(world.rotation, conjugate(before.rotation)));
+        const Vec3 ratio{world.scale.x / (before.scale.x != 0 ? before.scale.x : 1), world.scale.y / (before.scale.y != 0 ? before.scale.y : 1),
+                         world.scale.z / (before.scale.z != 0 ? before.scale.z : 1)};
+        for (u32 id : selectedRoots()) {
+            Entity* other = m_scene.find(id);
+            if (!other || id == m_selected || isDescendant(m_scene, id, m_selected) || m_locked.count(id)) continue;
+            Transform w = worldTransform(m_scene, *other);
+            if (op == ImGuizmo::TRANSLATE) {
+                w.position += world.position - before.position;
+            } else if (op == ImGuizmo::ROTATE) {
+                w.position = world.position + rotate(dq, w.position - before.position);
+                w.rotation = normalizeQuat(mul(dq, w.rotation));
+            } else {
+                Vec3 local = rotate(conjugate(before.rotation), w.position - before.position);
+                local = {local.x * ratio.x, local.y * ratio.y, local.z * ratio.z};
+                w.position = before.position + rotate(before.rotation, local);
+                w.scale = {w.scale.x * ratio.x, w.scale.y * ratio.y, w.scale.z * ratio.z};
+            }
+            setWorldTransform(m_scene, *other, w);
+        }
     }
     m_gizmoUsing = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
 }
@@ -1386,9 +1980,33 @@ void App::viewportInput() {
         m_clickX = mouse.x;
         m_clickY = mouse.y;
     }
+    if (m_clickCandidate && !io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left) && std::hypot(mouse.x - m_clickX, mouse.y - m_clickY) >= 5.0f)
+        m_boxSelecting = true;
     if (m_clickCandidate && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         m_clickCandidate = false;
-        if (std::hypot(mouse.x - m_clickX, mouse.y - m_clickY) < 5.0f && !io.KeyAlt) m_selected = pick(mouse.x, mouse.y);
+        const bool toggle = io.KeyShift || io.KeyCtrl;
+        if (m_boxSelecting) {
+            m_boxSelecting = false;
+            const f32 x0 = std::min(m_clickX, mouse.x), x1 = std::max(m_clickX, mouse.x), y0 = std::min(m_clickY, mouse.y), y1 = std::max(m_clickY, mouse.y);
+            if (!toggle) clickSelect(0, false);
+            for (const Entity& e : m_scene.entities) {
+                if (m_hidden.count(e.id) || m_locked.count(e.id)) continue;
+                f32 x, y;
+                if (project(worldTransform(m_scene, e).position, x, y) && x >= x0 && x <= x1 && y >= y0 && y <= y1 && !isSelected(e.id)) clickSelect(e.id, true);
+            }
+        } else if (std::hypot(mouse.x - m_clickX, mouse.y - m_clickY) < 5.0f && !io.KeyAlt) {
+            clickSelect(pick(mouse.x, mouse.y), toggle);
+        }
+    }
+    // Assets dragged from the Assets window and released over the view
+    if (const ImGuiPayload* payload = ImGui::GetDragDropPayload(); payload && payload->IsDataType(kDragAsset) && inside &&
+        !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)) {
+        Vec3 at;
+        groundPoint(mouse.x, mouse.y, at);
+        f32 x, y;
+        if (project(at, x, y)) ImGui::GetForegroundDrawList()->AddCircle({x, y}, 8.0f, IM_COL32(90, 200, 255, 230), 0, 2.0f);
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            placeAsset(std::string(static_cast<const char*>(payload->Data), static_cast<size_t>(payload->DataSize)), at);
     }
     const bool orbit = ImGui::IsMouseDown(ImGuiMouseButton_Right) || (io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left));
     const bool pan = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
@@ -1420,6 +2038,149 @@ void App::viewportInput() {
         if (ImGui::IsKeyDown(ImGuiKey_E)) m_pivot.y += speed;
         if (ImGui::IsKeyDown(ImGuiKey_Q)) m_pivot.y -= speed;
     }
+}
+
+// ---------------------------------------------------------------- Assets window
+
+void App::placeAsset(const std::string& path, Vec3 at) {
+    const std::string ext = lower(utf8Of(pathOf(path).extension()));
+    if (ext == ".scene") {
+        guarded(Pending::OpenPath, m_assets.resolve(path));
+        return;
+    }
+    if (ext == ".prefab") {
+        Scene prefab;
+        std::string error;
+        if (!loadPrefab(m_assets.resolve(path), prefab, error)) {
+            log("Cannot place " + path + ": " + error);
+            return;
+        }
+        const std::vector<u32> roots = placePrefab(m_scene, prefab, {at, {}, {1, 1, 1}});
+        m_selection = roots;
+        m_selected = roots.empty() ? 0 : roots.back();
+        log("Placed prefab " + path + " (" + std::to_string(prefab.entities.size()) + " objects)");
+        return;
+    }
+    const std::string name = utf8Of(pathOf(path).stem());
+    if (ext == ".png") {
+        Entity& e = addEntity(kKindSprite);
+        e.name = name;
+        e.setField("image", path);
+        e.color = 0xFFFFFFFF;
+        e.position = at;
+        return;
+    }
+    if (ext == ".glb" || ext == ".gltf") {
+        Entity& e = addEntity(kKindDecoration);
+        e.name = name;
+        e.model = path;
+        e.color = 0xFFFFFFFF;
+        e.position = at;
+        const ModelEntry& m = m_assets.model(path);
+        if (m.ok) e.position.y -= m.boundsMin.y; // stand on the point
+    }
+}
+
+void App::findUses(const std::string& path) {
+    m_selection.clear();
+    for (const Entity& e : m_scene.entities) {
+        bool used = e.model == path;
+        for (const auto& [key, value] : e.fields) used |= value == path;
+        if (used) m_selection.push_back(e.id);
+    }
+    m_selected = m_selection.empty() ? 0 : m_selection.back();
+    if (m_scene.environment.hdri == path || m_scene.environment.postValue("lut") == path) log(path + ": used by the scene environment");
+    log(path + ": " + std::to_string(m_selection.size()) + " objects in this scene use it (selected)");
+}
+
+void App::savePrefab(const std::string& name) {
+    const std::string text = writePrefab(m_scene, selectedRoots());
+    if (text.empty() || m_assets.assetsDir().empty()) return;
+    const std::filesystem::path path = pathOf(m_assets.assetsDir()) / "prefabs" / (name + ".prefab");
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::binary);
+    out << text;
+    out.close();
+    log(out ? "Saved prefab " + utf8Of(path) : "Cannot write " + utf8Of(path));
+}
+
+void App::drawAssets() {
+    if (m_prefabPopup) {
+        ImGui::OpenPopup("Save prefab");
+        m_prefabPopup = false;
+        if (!m_prefabName[0]) {
+            const Entity* e = m_scene.find(m_selected);
+            std::snprintf(m_prefabName, sizeof(m_prefabName), "%s", e ? e->name.c_str() : "prefab");
+        }
+    }
+    if (ImGui::BeginPopupModal("Save prefab", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Saves the %zu selected objects (with their children) to assets/prefabs/<name>.prefab", selectedRoots().size());
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool enter = ImGui::InputText("Name", m_prefabName, sizeof(m_prefabName), ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool valid = m_prefabName[0] && !std::strpbrk(m_prefabName, "\\/:*?\"<>|");
+        ImGui::BeginDisabled(!valid);
+        if (ImGui::Button("Save") || (enter && valid)) {
+            savePrefab(m_prefabName);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (ImGui::Begin("Assets")) {
+        if (m_assets.assetsDir().empty()) {
+            ImGui::TextDisabled("Open a project to see its assets.");
+        } else {
+            if (ImGui::Button("Rescan")) m_assets.rescan();
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputTextWithHint("##assetfilter", "Search assets", m_assetFilter, sizeof(m_assetFilter));
+            const std::string filter = lower(m_assetFilter);
+            if (ImGui::BeginTabBar("assetTabs")) {
+                const auto list = [&](const char* tab, const char* ext, const char* hint) {
+                    if (!ImGui::BeginTabItem(tab)) return;
+                    // Scanned when the tab is shown, at most every 2 seconds
+                    static std::map<std::string, std::pair<f64, std::vector<std::string>>> cache;
+                    auto& [scanned, files] = cache[ext];
+                    if (scanned == 0.0 || m_time - scanned > 2.0) {
+                        scanned = m_time;
+                        files = std::string(ext) == ".glb" ? m_assets.modelFiles() : m_assets.files(ext);
+                    }
+                    ImGui::TextDisabled("%s", hint);
+                    if (ImGui::BeginChild("files")) {
+                        for (const std::string& f : files) {
+                            if (!filter.empty() && lower(f).find(filter) == std::string::npos) continue;
+                            ImGui::PushID(f.c_str());
+                            ImGui::Selectable(f.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
+                            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) placeAsset(f, m_pivot);
+                            if (ImGui::BeginDragDropSource()) {
+                                ImGui::SetDragDropPayload(kDragAsset, f.data(), f.size());
+                                ImGui::Text("Place %s", f.c_str());
+                                ImGui::EndDragDropSource();
+                            }
+                            if (ImGui::BeginPopupContextItem("assetctx")) {
+                                if (ImGui::MenuItem("Place at the view center")) placeAsset(f, m_pivot);
+                                if (ImGui::MenuItem("Find uses in this scene")) findUses(f);
+                                if (ImGui::MenuItem("Copy path")) ImGui::SetClipboardText(f.c_str());
+                                ImGui::EndPopup();
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                    ImGui::EndChild();
+                    ImGui::EndTabItem();
+                };
+                list("Models", ".glb", "Drag into the view to place, double-click places at the view center");
+                list("Prefabs", ".prefab", "Placed as plain copies (Edit > Save selection as prefab makes one)");
+                list("Images", ".png", "Placed as sprites");
+                list("Scenes", ".scene", "Double-click opens");
+                ImGui::EndTabBar();
+            }
+        }
+    }
+    ImGui::End();
 }
 
 } // namespace mkrender::tool

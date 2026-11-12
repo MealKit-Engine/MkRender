@@ -221,6 +221,8 @@ std::string colorText(const u8 c[4]) {
     return buf;
 }
 
+std::string entitiesText(const std::vector<Entity>& entities);
+
 std::string writeScene(const Scene& scene) {
     const Environment& env = scene.environment;
     std::string out = "# MealKit scene\n@format scene " + std::to_string(kSceneFormatVersion) + "\n\n";
@@ -236,7 +238,12 @@ std::string writeScene(const Scene& scene) {
         line(out, "hdriRotation", floatText(env.hdriRotation));
     }
     for (const auto& [key, value] : postDefaults()) out += "post " + key + " " + env.postValue(key) + "\n";
-    for (const Entity& e : scene.entities) {
+    return out + entitiesText(scene.entities);
+}
+
+std::string entitiesText(const std::vector<Entity>& entities) {
+    std::string out;
+    for (const Entity& e : entities) {
         out += "\nentity\nid " + std::to_string(e.id) + "\nname " + e.name + "\nkind " + e.kind + "\n";
         if (e.parent) out += "parent " + std::to_string(e.parent) + "\n";
         if (!e.folder.empty()) out += "folder " + e.folder + "\n";
@@ -251,6 +258,88 @@ std::string writeScene(const Scene& scene) {
         out += "end\n";
     }
     return out;
+}
+
+Transform combineTransforms(const Transform& parent, const Transform& local) {
+    const Vec3 scaled{local.position.x * parent.scale.x, local.position.y * parent.scale.y, local.position.z * parent.scale.z};
+    return {parent.position + rotate(parent.rotation, scaled), normalizeQuat(mul(parent.rotation, local.rotation)),
+            {parent.scale.x * local.scale.x, parent.scale.y * local.scale.y, parent.scale.z * local.scale.z}};
+}
+
+std::string writePrefab(const Scene& scene, const std::vector<u32>& roots) {
+    std::vector<u32> ids;
+    for (const Entity& e : scene.entities)
+        for (u32 root : roots)
+            if (e.id == root || isDescendant(scene, e.id, root)) {
+                ids.push_back(e.id);
+                break;
+            }
+    const Entity* first = roots.empty() ? nullptr : scene.find(roots.front());
+    if (ids.empty() || !first) return {};
+    Vec3 origin = worldTransform(scene, *first).position;
+    origin.y = 0.0f; // heights above the y = 0 floor are kept
+    const auto newId = [&](u32 id) { return static_cast<u32>(std::find(ids.begin(), ids.end(), id) - ids.begin()) + 1; };
+    std::vector<Entity> entities;
+    for (u32 id : ids) {
+        const Entity& source = *scene.find(id);
+        Entity e = source;
+        e.id = newId(id);
+        if (std::find(roots.begin(), roots.end(), id) != roots.end()) {
+            const Transform world = worldTransform(scene, source);
+            e.position = world.position - origin;
+            e.rotation = world.rotation;
+            e.scale = world.scale;
+            e.parent = 0;
+            e.folder.clear();
+        } else {
+            e.parent = newId(source.parent);
+        }
+        entities.push_back(std::move(e));
+    }
+    return "# MealKit prefab. Placed in scenes as copies from the editor's [Assets] window\n@format prefab 1\n" + entitiesText(entities);
+}
+
+bool loadPrefab(const std::string& path, Scene& out, std::string& error) {
+    std::ifstream in(pathOf(path), std::ios::binary);
+    if (!in) {
+        error = "cannot open " + path;
+        return false;
+    }
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const size_t at = text.find("@format prefab");
+    if (at == std::string::npos) {
+        error = "not a prefab file";
+        return false;
+    }
+    const size_t end = text.find('\n', at);
+    text.replace(at, end == std::string::npos ? std::string::npos : end - at, "@format scene 5");
+    return readScene(text, out, error, nullptr);
+}
+
+std::vector<u32> placePrefab(Scene& scene, const Scene& prefab, const Transform& at) {
+    std::vector<std::pair<u32, u32>> remap;
+    for (const Entity& e : prefab.entities) remap.push_back({e.id, scene.nextId++});
+    const auto mapped = [&](u32 id) {
+        for (const auto& [from, to] : remap)
+            if (from == id) return to;
+        return 0u;
+    };
+    std::vector<u32> roots;
+    for (const Entity& source : prefab.entities) {
+        Entity e = source;
+        e.id = mapped(source.id);
+        if (source.parent) {
+            e.parent = mapped(source.parent);
+        } else {
+            const Transform placed = combineTransforms(at, {source.position, source.rotation, source.scale});
+            e.position = placed.position;
+            e.rotation = placed.rotation;
+            e.scale = placed.scale;
+            roots.push_back(e.id);
+        }
+        scene.entities.push_back(std::move(e));
+    }
+    return roots;
 }
 
 bool readScene(const std::string& text, Scene& out, std::string& error, std::vector<std::string>* warnings) {

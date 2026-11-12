@@ -9,6 +9,7 @@
 #include <deque>
 #include <filesystem>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@ public:
     void setPending(const std::string& path); // from a file dialog thread or a drop
     void openPending();
     void select(u32 id);
+    void addToSelection(u32 id) { syncSelection(); if (!isSelected(id)) clickSelect(id, true); }
     void setLightingModel(LightingModel model);
     std::string title() const;
     void log(const std::string& line);
@@ -64,6 +66,34 @@ private:
     Entity& addEntity(const std::string& kind);
     void duplicateSelected();
     void deleteSelected();
+    // Selection: m_selected is the primary object (inspector, gizmo), m_selection all selected ones including it
+    bool isSelected(u32 id) const;
+    void clickSelect(u32 id, bool toggle); // toggle: Shift adds/removes
+    void syncSelection();
+    std::vector<u32> selectedRoots() const; // selected objects whose ancestors aren't selected
+    bool worldBox(const Entity& e, Vec3& lo, Vec3& hi); // world AABB (a point for markers)
+    void alignSelection(int axis, int mode);  // mode 0 min, 1 center, 2 max (to the primary object)
+    void distributeSelection(int axis);
+    void dropToFloor();
+    // Hidden/locked objects and camera bookmarks: build/editor/<scene>.view, shared with the MealKit editor
+    std::string viewStatePath() const;
+    void loadViewState();
+    void saveViewState() const;
+    void setHidden(const std::vector<u32>& ids, bool hidden);
+    void setLocked(const std::vector<u32>& ids, bool locked);
+    // Preferences (grid, snap, autosave, recent scenes) in the user's MkRender folder
+    void loadPrefs();
+    void savePrefs() const;
+    void addRecent(const std::string& path);
+    std::string autosavePath() const;
+    void autosave();
+    // Assets
+    void drawAssets();
+    void placeAsset(const std::string& path, Vec3 at);
+    void findUses(const std::string& path);
+    void savePrefab(const std::string& name);
+    bool groundPoint(f32 mouseX, f32 mouseY, Vec3& out); // under the mouse: an object's surface or the y = 0 floor
+    Vec3 spriteSize(const Entity& e); // multiplier of the object's x/y scale (pixelsPerUnit), 1 1 otherwise
     void reparent(u32 id, u32 parent);
     void frameSelected();
 
@@ -88,7 +118,8 @@ private:
     Mat4 viewMatrix() const;
     Mat4 projMatrix() const;
     bool project(Vec3 world, f32& x, f32& y) const; // ImGui coordinates
-    u32 pick(f32 mouseX, f32 mouseY);               // ImGui coordinates, 0 if nothing
+    u32 pick(f32 mouseX, f32 mouseY, f32* hitDistance = nullptr); // ImGui coordinates, 0 if nothing
+    void mouseRay(f32 mouseX, f32 mouseY, Vec3& eye, Vec3& dir) const;
     bool entityBounds(const Entity& e, Vec3& lo, Vec3& hi); // model-space box drawn for e
     bool isMarker(const Entity& e) const;
     bool isArea(const Entity& e) const;
@@ -113,6 +144,15 @@ private:
 
     // Selection and inspector
     u32 m_selected = 0;
+    std::vector<u32> m_selection;
+    std::set<u32> m_hidden, m_locked;
+    struct Bookmark {
+        bool set = false;
+        Vec3 position; // the editor's fly camera: position, yaw, pitch (pitch up positive)
+        f32 yaw = 0.0f, pitch = 0.0f;
+    };
+    Bookmark m_bookmarks[9];
+    bool m_boxSelecting = false;
     u32 m_eulerFor = 0;
     Vec3 m_euler; // degrees, kept while the rotation is edited (no jumps from quaternion round trips)
     char m_filter[64] = {};
@@ -129,6 +169,15 @@ private:
     bool m_gizmoLocal = false;
     bool m_gizmoUsing = false;
     bool m_showMarkers = true;
+    bool m_showGrid = true;
+    bool m_alwaysSnap = false;
+    f32 m_gridStep = 1.0f, m_snapMove = 0.5f, m_snapRotate = 15.0f, m_snapScale = 0.1f;
+    f32 m_autosaveMinutes = 2.0f; // 0 = off
+    f64 m_autosaveAt = 0.0;
+    std::vector<std::string> m_recent;
+    char m_assetFilter[64] = {};
+    char m_prefabName[64] = {};
+    bool m_prefabPopup = false;
     bool m_clickCandidate = false;
     f32 m_clickX = 0, m_clickY = 0;
 

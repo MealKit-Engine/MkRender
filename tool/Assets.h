@@ -20,6 +20,23 @@ struct ModelEntry {
     u32 triangles = 0, materials = 0, textures = 0;
 };
 
+// One sprite image cell as a 1 x 1 m quad on x/y facing -z (pivot at the origin), alpha-tested texture
+struct SpriteEntry {
+    MeshId mesh = kNoMesh;
+    u32 cellWidth = 0, cellHeight = 0; // pixels
+    std::string error;
+};
+
+// Scatter layer instances (assets/terrain/<scene>_<id>.scatter, "i x y z yaw scale" lines, world positions)
+struct ScatterItem {
+    Vec3 position;
+    f32 yaw = 0.0f, scale = 1.0f;
+};
+struct ScatterEntry {
+    std::vector<ScatterItem> items;
+    std::string error;
+};
+
 class Assets {
 public:
     void init(Renderer& renderer);
@@ -34,6 +51,11 @@ public:
     MeshId box() const { return m_box; }
     // Terrain mesh of one object (rebuilt when its heightmap or size changes). Vertices relative to the box center
     MeshId terrain(u32 entityId, const std::string& heightmap, Vec3 size, std::string* error);
+
+    // Sprite quad of one cell of an image sheet (cached per image and cell layout)
+    const SpriteEntry& sprite(const std::string& image, int columns, int rows, int cell, f32 pivotX, f32 pivotY, bool flipX, bool flipY);
+    // Scatter file (reread when it changes on disk)
+    const ScatterEntry& scatter(const std::string& file);
 
     // Model files under assets (relative paths, sorted). Scanned on first call and by rescan()
     const std::vector<std::string>& modelFiles();
@@ -51,6 +73,17 @@ private:
     std::string m_assetsDir;
     std::map<std::string, ModelEntry> m_models;
     std::map<u32, TerrainEntry> m_terrains;
+    struct ImageEntry {
+        u32 material = 0, width = 0, height = 0;
+        std::string error;
+    };
+    std::map<std::string, ImageEntry> m_images; // sprite textures by path
+    std::map<std::string, SpriteEntry> m_sprites;
+    struct ScatterFile {
+        ScatterEntry entry;
+        long long time = 0;
+    };
+    std::map<std::string, ScatterFile> m_scatters;
     MeshId m_box = kNoMesh;
     std::vector<std::string> m_modelFiles;
     bool m_scanned = false;

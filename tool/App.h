@@ -58,7 +58,11 @@ public:
     void linkStop();
     void linkLook(u32 cameraId, const std::string& cutscene = {});
     bool linkPlayWhenReady = false;
-    std::string focusWindow; // --window <name>: brings that docked window to the front (captures for docs and checks) // --editor-play: play once an editor is found
+    std::string focusWindow;
+    // Graphics regression shots (--render-golden): the whole window from the editor's fly camera (eye, yaw/pitch in degrees, 60 degree fov),
+    // no UI, no selection, view time 0 (animation clips at their offset, wind still)
+    void setShot(Vec3 eye, f32 yawDegrees, f32 pitchDegrees);
+    bool shotMode() const { return m_shot; } // --window <name>: brings that docked window to the front (captures for docs and checks) // --editor-play: play once an editor is found
 
 private:
     enum class Pending { None, Quit, OpenPath, NewScene };
@@ -211,6 +215,7 @@ private:
     LightingModel m_lighting = LightingModel::Pbr;
     std::vector<PointLight> m_lights;
     bool m_playAnims = true;
+    bool m_shot = false;
     // Asset thumbnails (Assets window): models and PNGs drawn into small offscreen targets, one per frame, redrawn when the file changes
     struct Thumb {
         mkrhi::RenderTarget target{};

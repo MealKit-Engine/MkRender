@@ -819,6 +819,18 @@ void App::frameSelected() {
 
 // ---------------------------------------------------------------- View math
 
+void App::setShot(Vec3 eye, f32 yawDegrees, f32 pitchDegrees) {
+    m_shot = true;
+    m_playAnims = false;
+    m_selection.clear();
+    m_selected = 0;
+    m_yaw = yawDegrees * kDeg;
+    m_pitch = -pitchDegrees * kDeg; // the editor's pitch looks up when positive
+    m_fov = 60.0f;                  // the editor's kFovY
+    m_distance = 10.0f;
+    m_pivot = eye + cameraForward() * m_distance;
+}
+
 Vec3 App::cameraForward() const { return {std::cos(m_pitch) * std::sin(m_yaw), -std::sin(m_pitch), std::cos(m_pitch) * std::cos(m_yaw)}; }
 Vec3 App::cameraEye() const { return m_pivot - cameraForward() * m_distance; }
 Mat4 App::viewMatrix() const { return lookAtLH(cameraEye(), m_pivot, {0, 1, 0}); }
@@ -1000,7 +1012,7 @@ FrameParams App::frameParams() const {
     p.groundColor = env.groundColor;
     p.fogColor = env.fogColor;
     p.fogDensity = env.fogDensity;
-    p.time = static_cast<f32>(m_time);
+    p.time = m_shot ? 0.0f : static_cast<f32>(m_time);
     PostParams& post = p.post;
     post.toneMapping = env.postValue("toneMapping") != "false";
     post.punchy = env.postValue("punchy") != "false";
@@ -1751,6 +1763,7 @@ void App::frame(f64 dt) {
         m_uiW = std::max(1.0f, central->Size.x);
         m_uiH = std::max(1.0f, central->Size.y);
         m_view = {m_uiX * s, m_uiY * s, m_uiW * s, m_uiH * s};
+        if (m_shot) m_view = {0.0f, 0.0f, static_cast<f32>(m_renderer->width()), static_cast<f32>(m_renderer->height())};
         m_view.width = std::min(m_view.width, static_cast<f32>(m_renderer->width()) - m_view.x);
         m_view.height = std::min(m_view.height, static_cast<f32>(m_renderer->height()) - m_view.y);
     }

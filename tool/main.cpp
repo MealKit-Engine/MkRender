@@ -1,7 +1,7 @@
 // MkRender executable: SDL3 window, mkrender drawing into it (DX12 or Vulkan, the backend MkRender was built with),
 // Dear ImGui panels drawn by mkrhi's ImGui backend. The actual screen is App (scene editor).
 //   MkRender [--project <MealKit project folder>] [--file <.scene|.gltf|.glb>] [file] [--select <id>[,<id>...]]
-//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--editor-play] [--window <name>] [--version]
+//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--editor-play] [--window <name>] [--render-golden <shots.txt> <folder>] [--version]
 //   MkRender --check-terrain <file.png|file.scatter>   decodes and encodes with mkterrain: "TERRAIN same" when the bytes come back
 //   MkRender --check-scene <file.scene>   reads and writes the scene in memory: "SCENE same" when the text comes back
 //            unchanged, "SCENE equal" when only float text differs (old %.9g files), else the first differing line (exit 1)
@@ -166,6 +166,7 @@ int checkScene(const std::string& path) {
 int main(int argc, char** argv) {
     std::string project, file, capture;
     std::string focusWindow; // --window Assets: that window in front
+    std::string goldenShots, goldenOut; // --render-golden <shots.txt> <folder>: the engine's graphics regression shots, saved as <name>.png
     bool editorPlay = false; // --editor-play: ask the project's running editor to play the scene once it's found
     bool bakeProbes = false, gradingCapture = false; // --bake-probes, --grading-capture: run once after opening (with --frames for scripts)
     long frames = 0; // --frames N: quit after N frames (--capture saves the last one as PNG, for docs and tests)
@@ -183,6 +184,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--grading-capture") == 0) gradingCapture = true;
         else if (std::strcmp(argv[i], "--editor-play") == 0) editorPlay = true;
         else if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) focusWindow = argv[++i];
+        else if (std::strcmp(argv[i], "--render-golden") == 0 && i + 2 < argc) goldenShots = argv[++i], goldenOut = argv[++i];
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--check-terrain") == 0 && i + 1 < argc) return checkTerrain(argv[++i]);
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
@@ -200,11 +202,19 @@ int main(int argc, char** argv) {
         return 1;
     }
     const float scale = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
-    SDL_Window* window = SDL_CreateWindow("MkRender", static_cast<int>(1500 * scale), static_cast<int>(900 * scale),
+    // Golden shots: 1600 x 900 pixels like the editor's reference images
+    const int windowW = goldenShots.empty() ? static_cast<int>(1500 * scale) : 1600;
+    const int windowH = goldenShots.empty() ? static_cast<int>(900 * scale) : 900;
+    SDL_Window* window = SDL_CreateWindow("MkRender", windowW, windowH,
                                           SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN);
     if (!window) {
         SDL_Log("Cannot create the window: %s", SDL_GetError());
         return 1;
+    }
+    if (!goldenShots.empty()) { // window units may not be pixels (high pixel density): make the pixel size 1600 x 900
+        int px = 0, py = 0;
+        SDL_GetWindowSizeInPixels(window, &px, &py);
+        if (px > 0 && py > 0 && (px != 1600 || py != 900)) SDL_SetWindowSize(window, 1600 * 1600 / px, 900 * 900 / py);
     }
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     int pw = 0, ph = 0;
@@ -267,6 +277,37 @@ int main(int argc, char** argv) {
     app.linkPlayWhenReady = editorPlay;
     app.focusWindow = focusWindow;
 
+    // --render-golden: "name scene x y z yaw pitch [pbr|toon|unlit]" lines (MealKit engine/tests/golden/shots.txt), scenes relative to the project's assets
+    struct Shot {
+        std::string name, scene, lighting;
+        mkrender::Vec3 eye;
+        float yaw = 0, pitch = 0;
+    };
+    std::vector<Shot> shots;
+    int goldenExit = 0;
+    if (!goldenShots.empty()) {
+        std::ifstream in(std::filesystem::path(std::u8string(goldenShots.begin(), goldenShots.end())));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == '#' || line[0] == '\r') continue;
+            std::istringstream ls(line);
+            Shot s;
+            if (ls >> s.name >> s.scene >> s.eye.x >> s.eye.y >> s.eye.z >> s.yaw >> s.pitch) {
+                ls >> s.lighting;
+                shots.push_back(s);
+            }
+        }
+        if (shots.empty() || project.empty()) {
+            std::printf("GOLDEN no shots in %s (or no --project)\n", goldenShots.c_str());
+            return 1;
+        }
+        std::filesystem::create_directories(std::filesystem::path(std::u8string(goldenOut.begin(), goldenOut.end())));
+    }
+    constexpr long kGoldenFrames = 6; // models, terrain and HDRIs are uploaded in the first frame
+    size_t goldenIndex = 0;
+    long goldenFrame = 0;
+    const std::string defaultLighting = lighting == 1 ? "toon" : lighting == 2 ? "unlit" : "pbr";
+
     mkrender::DrawList list;
     Uint64 last = SDL_GetPerformanceCounter();
     std::string shownTitle;
@@ -294,8 +335,38 @@ int main(int argc, char** argv) {
         mkrhi::imguiNewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
+        std::string goldenPng;
+        if (!shots.empty()) { // graphics regression shot: open the scene, fixed camera, no UI
+            const Shot& shot = shots[goldenIndex];
+            if (goldenFrame == 0) {
+                const std::string scene = project + "/assets/" + shot.scene;
+                if (!app.openFile(scene)) {
+                    std::printf("GOLDEN %s cannot open %s\n", shot.name.c_str(), shot.scene.c_str());
+                    goldenExit = 1;
+                    break;
+                }
+                const std::string l = shot.lighting.empty() ? defaultLighting : shot.lighting;
+                app.setLightingModel(l == "toon" ? mkrender::LightingModel::Toon : l == "unlit" ? mkrender::LightingModel::Unlit : mkrender::LightingModel::Pbr);
+                app.setShot(shot.eye, shot.yaw, shot.pitch);
+            }
+            if (goldenFrame + 1 == kGoldenFrames) {
+                goldenPng = goldenOut + "/" + shot.name + ".png";
+                app.saveScreenshot(goldenPng, false);
+            }
+        }
         app.frame(dt);
         ImGui::Render();
+        if (!goldenPng.empty()) {
+            const Shot& shot = shots[goldenIndex];
+            std::printf("GOLDEN %s %ux%u -> %s\n", shot.name.c_str(), renderer.width(), renderer.height(), goldenPng.c_str());
+        }
+        if (!shots.empty() && ++goldenFrame == kGoldenFrames) {
+            goldenFrame = 0;
+            if (++goldenIndex == shots.size()) {
+                frames = 1; // this frame is the last one (its capture is saved at endFrame)
+                frame = 0;
+            }
+        }
         const bool lastFrame = frames > 0 && ++frame >= frames;
         if (lastFrame) {
             running = false;
@@ -320,6 +391,7 @@ int main(int argc, char** argv) {
     }
 
     renderer.waitIdle();
+    if (!goldenShots.empty()) std::fflush(stdout);
     g_app = nullptr;
     app.shutdown();
     mkrhi::imguiShutdown(renderer.device());
@@ -328,5 +400,5 @@ int main(int argc, char** argv) {
     renderer.shutdown();
     SDL_DestroyWindow(window);
     SDL_Quit();
-    return 0;
+    return goldenExit;
 }

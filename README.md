@@ -99,6 +99,7 @@ MkRender [--project <folder>] [--file <.scene|.gltf|.glb>] [--select <id>] [--li
          [--debug-layer] [--frames N --capture out.png] [--bake-probes] [--grading-capture] [--editor-play] [--window <name>] [--version]
 MkRender --check-scene <file.scene>   # read + write in memory: same / upgraded / FAIL with the first differing line
 MkRender --check-terrain <file.png|file.scatter>   # decode + encode with mkterrain: same bytes, or the same samples from another encoder
+MkRender --project <folder> --render-golden <shots.txt> <out folder>   # the MealKit engine's graphics regression shots (engine/tests/golden), 1600 x 900, no UI
 ```
 
 Playing goes through the project's running MealKit editor (MealKit-Contract "Scene service" on the live connection): MkRender finds it in `<project>/build/live/`, and the Editor menu (F5, Shift+F5) saves the scene and asks the editor to play it in its play view, from this view's camera with Shift (solo; a selected spawn point is used as is), stop, look through the selected virtual camera or preview a cutscene. The editor's [Scenes] window and asset menu open a scene here with "Open in MkRender".

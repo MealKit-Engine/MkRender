@@ -4,7 +4,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
+#include <functional>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -223,6 +225,130 @@ AnimationClip bakeClip(const cgltf_animation& anim, const SkinState& state, cons
         }
     }
     return clip;
+}
+
+// Style preset material features from Blender custom properties (glTF material extras "mealkit_outline" ...), the engine's asset/ModelCache.cpp
+struct FeatureKey {
+    const char* key;
+    const char* label; // Blender panel (English)
+    u32 feature;       // kMaterial*
+    bool color;        // three linear color values (otherwise a single number)
+    size_t offset;     // value within MaterialData
+};
+const FeatureKey kFeatureKeys[] = {
+    {"outline", "Outline width (m)", kMaterialOutline, false, offsetof(MaterialData, outlineWidth)},
+    {"outlineColor", "Outline color", kMaterialOutline, true, offsetof(MaterialData, outlineColor)},
+    {"wind", "Wind sway (m, vertex alpha)", kMaterialWind, false, offsetof(MaterialData, windStrength)},
+    {"rim", "Rim light strength", kMaterialRim, false, offsetof(MaterialData, rimStrength)},
+    {"rimColor", "Rim light color", kMaterialRim, true, offsetof(MaterialData, rimColor)},
+    {"dissolve", "Dissolve edge width", kMaterialDissolve, false, offsetof(MaterialData, dissolveEdge)},
+    {"dissolveColor", "Dissolve edge glow", kMaterialDissolve, true, offsetof(MaterialData, dissolveColor)},
+};
+
+// Top-level keys and values of an extras JSON object. Only numbers/number arrays are read as values (numbers); other values (strings/objects/booleans) get empty numbers.
+// Stops where the format breaks (it's JSON written by the Blender exporter, so no strict validation)
+struct ExtraValue {
+    std::string key;
+    std::vector<f32> numbers;
+};
+
+std::vector<ExtraValue> parseExtras(const char* json) {
+    std::vector<ExtraValue> out;
+    const char* p = json;
+    const auto ws = [&] { while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p; };
+    const auto skipString = [&](std::string* text) { // p is the opening quote
+        ++p;
+        while (*p && *p != '"') {
+            if (*p == '\\' && p[1]) ++p;
+            if (text) text->push_back(*p);
+            ++p;
+        }
+        if (*p == '"') ++p;
+    };
+    const auto number = [&](f32& v) {
+        char* end = nullptr;
+        v = std::strtof(p, &end);
+        if (end == p) return false;
+        p = end;
+        return true;
+    };
+    std::function<void()> skipValue = [&] {
+        ws();
+        if (*p == '"') return skipString(nullptr);
+        if (*p == '{' || *p == '[') {
+            const char close = *p == '{' ? '}' : ']';
+            ++p;
+            for (ws(); *p && *p != close; ws()) {
+                if (*p == ',' || *p == ':') ++p;
+                else skipValue();
+            }
+            if (*p) ++p;
+            return;
+        }
+        while (*p && *p != ',' && *p != '}' && *p != ']') ++p; // numbers, true, false, null
+    };
+    ws();
+    if (*p != '{') return out;
+    ++p;
+    for (;;) {
+        ws();
+        if (*p != '"') break;
+        ExtraValue v;
+        skipString(&v.key);
+        ws();
+        if (*p != ':') break;
+        ++p;
+        ws();
+        f32 n = 0.0f;
+        if (*p == '[') {
+            const char* start = p++;
+            bool numeric = true;
+            for (ws(); *p && *p != ']'; ws()) {
+                if (*p == ',') { ++p; continue; }
+                if (!number(n)) { numeric = false; break; }
+                v.numbers.push_back(n);
+            }
+            if (!numeric) {
+                v.numbers.clear();
+                p = start;
+                skipValue();
+            } else if (*p) {
+                ++p;
+            }
+        } else if (!(*p == '-' || (*p >= '0' && *p <= '9')) || !number(n)) {
+            skipValue();
+        } else {
+            v.numbers.push_back(n);
+        }
+        out.push_back(std::move(v));
+        ws();
+        if (*p != ',') break;
+        ++p;
+    }
+    return out;
+}
+
+void applyMaterialExtras(const char* json, MaterialData& material, std::vector<std::string>& problems) {
+    if (!json) return;
+    for (const ExtraValue& v : parseExtras(json)) {
+        if (v.key.rfind("mealkit_", 0) != 0) continue;
+        const std::string name = v.key.substr(8);
+        const FeatureKey* key = nullptr;
+        for (const FeatureKey& k : kFeatureKeys)
+            if (name == k.key) key = &k;
+        if (!key) {
+            problems.push_back("unknown engine feature '" + v.key + "' (ignored)");
+            continue;
+        }
+        const size_t want = key->color ? 3 : 1;
+        if (v.numbers.size() != want) {
+            problems.push_back("'" + v.key + "' needs " + (key->color ? "a color (3 numbers)" : "a number") + " (ignored)");
+            continue;
+        }
+        f32* target = reinterpret_cast<f32*>(reinterpret_cast<u8*>(&material) + key->offset);
+        for (size_t i = 0; i < want; ++i) target[i] = std::max(v.numbers[i], 0.0f);
+        if (!key->color) material.features |= key->feature; // only main keys turn features on (color alone leaves it off by default)
+    }
 }
 
 struct Loader {
@@ -466,6 +592,9 @@ bool loadGltf(const std::string& path, ModelData& out, std::string& error) {
             md.normalTexture = loader.texture(m->normal_texture, 2);
             md.normalScale = m->normal_texture.scale;
             if (m->alpha_mode == cgltf_alpha_mode_mask) md.alphaCutoff = std::max(m->alpha_cutoff, 1e-3f);
+            std::vector<std::string> problems;
+            applyMaterialExtras(m->extras.data, md, problems);
+            for (const std::string& p : problems) out.warnings.push_back("material " + name + ": " + p);
         }
         out.materials.push_back(md);
         out.materialNames.push_back(name);

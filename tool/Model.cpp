@@ -17,6 +17,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
+#define STBI_ONLY_HDR // sky HDRIs (Assets::environment)
 #include <stb_image.h>
 #if defined(_MSC_VER)
 #pragma warning(pop)
@@ -75,7 +76,7 @@ struct Loader {
     ModelData& out;
     std::string path;
     std::vector<const cgltf_material*> materials;
-    std::vector<std::pair<const cgltf_image*, bool>> imageKeys; // (image, srgb) -> out.images index
+    std::vector<std::pair<const cgltf_image*, u8>> imageKeys; // (image, usage) -> out.images index
 
     u16 material(const cgltf_material* m) {
         for (size_t i = 0; i < materials.size(); ++i)
@@ -158,11 +159,12 @@ struct Loader {
         for (cgltf_size i = 0; i < n->children_count; ++i) node(n->children[i]);
     }
 
-    u32 texture(const cgltf_texture_view& view, bool srgb) {
+    u32 texture(const cgltf_texture_view& view, u8 usage) { // 0 color (sRGB), 1 linear, 2 normal
+        const bool srgb = usage == 0;
         const cgltf_image* image = view.texture ? view.texture->image : nullptr;
         if (!image) return kNoTexture;
         for (size_t i = 0; i < imageKeys.size(); ++i)
-            if (imageKeys[i].first == image && imageKeys[i].second == srgb) return static_cast<u32>(i);
+            if (imageKeys[i].first == image && imageKeys[i].second == usage) return static_cast<u32>(i);
         const std::string name = image->name ? image->name : image->uri ? image->uri : "?";
         std::string storage;
         const u8* bytes = nullptr;
@@ -181,6 +183,7 @@ struct Loader {
         }
         TextureImage t;
         t.srgb = srgb;
+        t.usage = usage;
         int w = 0, h = 0, comp = 0;
         stbi_uc* pixels = bytes ? stbi_load_from_memory(bytes, static_cast<int>(size), &w, &h, &comp, 4) : nullptr;
         if (!pixels) {
@@ -191,7 +194,8 @@ struct Loader {
         t.height = static_cast<u32>(h);
         t.rgba.assign(pixels, pixels + static_cast<size_t>(w) * h * 4);
         stbi_image_free(pixels);
-        imageKeys.emplace_back(image, srgb);
+        t.encoded.assign(reinterpret_cast<const char*>(bytes), size);
+        imageKeys.emplace_back(image, usage);
         out.images.push_back(std::move(t));
         return static_cast<u32>(out.images.size() - 1);
     }
@@ -269,14 +273,14 @@ bool loadGltf(const std::string& path, ModelData& out, std::string& error) {
                 std::memcpy(md.baseColor, pbr.base_color_factor, sizeof(md.baseColor));
                 md.metallic = pbr.metallic_factor;
                 md.roughness = pbr.roughness_factor;
-                md.baseColorTexture = loader.texture(pbr.base_color_texture, true);
-                md.metallicRoughnessTexture = loader.texture(pbr.metallic_roughness_texture, false);
+                md.baseColorTexture = loader.texture(pbr.base_color_texture, 0);
+                md.metallicRoughnessTexture = loader.texture(pbr.metallic_roughness_texture, 1);
             }
             std::memcpy(md.emissive, m->emissive_factor, sizeof(md.emissive));
             if (m->has_emissive_strength)
                 for (f32& e : md.emissive) e *= m->emissive_strength.emissive_strength;
-            md.emissiveTexture = loader.texture(m->emissive_texture, true);
-            md.normalTexture = loader.texture(m->normal_texture, false);
+            md.emissiveTexture = loader.texture(m->emissive_texture, 0);
+            md.normalTexture = loader.texture(m->normal_texture, 2);
             md.normalScale = m->normal_texture.scale;
             if (m->alpha_mode == cgltf_alpha_mode_mask) md.alphaCutoff = std::max(m->alpha_cutoff, 1e-3f);
         }

@@ -720,6 +720,7 @@ void App::loadPrefs() {
         else if (key == "grid") m_showGrid = value == "true";
         else if (key == "alwaysSnap") m_alwaysSnap = value == "true";
         else if (key == "markers") m_showMarkers = value != "false";
+        else if (key == "compressTextures") m_assets.setCompressTextures(value != "false");
         else if (number && key == "gridStep") m_gridStep = std::max(v, 0.01f);
         else if (number && key == "snapMove") m_snapMove = std::max(v, 0.001f);
         else if (number && key == "snapRotate") m_snapRotate = std::max(v, 0.1f);
@@ -735,7 +736,8 @@ void App::savePrefs() const {
     out << "# MkRender preferences\n";
     out << "grid " << (m_showGrid ? "true" : "false") << "\ngridStep " << floatText(m_gridStep) << "\nalwaysSnap " << (m_alwaysSnap ? "true" : "false")
         << "\nmarkers " << (m_showMarkers ? "true" : "false") << "\nsnapMove " << floatText(m_snapMove) << "\nsnapRotate " << floatText(m_snapRotate)
-        << "\nsnapScale " << floatText(m_snapScale) << "\nautosaveMinutes " << floatText(m_autosaveMinutes) << "\n";
+        << "\nsnapScale " << floatText(m_snapScale) << "\nautosaveMinutes " << floatText(m_autosaveMinutes)
+        << "\ncompressTextures " << (m_assets.compressTextures() ? "true" : "false") << "\n";
     for (const std::string& r : m_recent) out << "recent " << r << "\n";
 }
 
@@ -975,10 +977,194 @@ FrameParams App::frameParams() const {
     parseFloat(env.postValue("chromaticAberration"), post.chromaticAberration);
     p.lights = m_lights.data();
     p.lightCount = static_cast<u32>(m_lights.size());
+    p.environment = m_environmentId;
+    p.environmentIntensity = env.hdriIntensity;
+    p.environmentRotation = env.hdriRotation * kDeg;
+    p.probes = m_probeList.data();
+    p.probeCount = static_cast<u32>(std::min<size_t>(m_probeList.size(), kMaxReflectionProbes));
+    post.lut = m_lutId;
     return p;
 }
 
+void App::reportProblem(const std::string& what) {
+    if (std::find(m_modelProblems.begin(), m_modelProblems.end(), what) != m_modelProblems.end()) return;
+    m_modelProblems.push_back(what);
+    log(what);
+}
+
+std::string App::sceneStem() const { return m_path.empty() ? std::string("untitled") : utf8Of(pathOf(m_path).stem()); }
+
+// ---------------------------------------------------------------- Probes and grading
+
+void App::bakeProbes(u32 onlyId) {
+    m_probeQueue.clear();
+    m_probeFace = 0;
+    m_probeCapturePending = false;
+    if (m_project.empty()) {
+        log("Open a project first: probes are written to its assets/probes");
+        return;
+    }
+    for (const Entity& e : m_scene.entities)
+        if (e.is(kKindProbe) && (!onlyId || e.id == onlyId)) m_probeQueue.push_back(e.id);
+    if (m_probeQueue.empty()) log("No reflection probes to bake");
+    else log("Baking " + std::to_string(m_probeQueue.size()) + " reflection probe(s)");
+}
+
+void App::fillScene(DrawList& list, bool highlight) {
+    const std::vector<u32> selection = m_selection;
+    const u32 selected = m_selected;
+    if (!highlight) {
+        m_selection.clear();
+        m_selected = 0;
+    }
+    addScene(list);
+    m_selection = selection;
+    m_selected = selected;
+}
+
+void App::finishProbeFace() {
+    m_probeCapturePending = false;
+    const u32 size = m_probeSize;
+    m_probeFaces.resize(static_cast<size_t>(size) * size * 18);
+    if (m_probeCapture.width == size && m_probeCapture.height == size) { // sRGB 8-bit -> linear
+        f32* dst = &m_probeFaces[static_cast<size_t>(m_probeFace) * size * size * 3];
+        for (size_t i = 0; i < static_cast<size_t>(size) * size; ++i)
+            for (u32 c = 0; c < 3; ++c) {
+                const f32 v = static_cast<f32>(m_probeCapture.rgba[i * 4 + c]) / 255.0f;
+                dst[i * 3 + c] = v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+            }
+    }
+    if (++m_probeFace < 6) return;
+    m_probeFace = 0;
+    const u32 id = m_probeQueue.front();
+    m_probeQueue.erase(m_probeQueue.begin());
+    Entity* e = m_scene.find(id);
+    if (!e) return;
+    ProbeMap probe;
+    bakeProbe(m_probeFaces.data(), size, probe);
+    const std::string rel = "probes/" + sceneStem() + "_" + std::to_string(id) + ".mkprobe"; // scene::probeFileFor
+    const std::string file = m_assets.resolve(rel);
+    std::error_code ec;
+    std::filesystem::create_directories(pathOf(file).parent_path(), ec);
+    std::ofstream out(pathOf(file), std::ios::binary | std::ios::trunc);
+    const std::string bytes = probeFileBytes(probe);
+    if (!out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+        log("Cannot write " + file);
+        return;
+    }
+    out.close();
+    if (e->field("bake") != rel) e->setField("bake", rel);
+    log("Baked reflection probe " + rel + " (" + std::to_string(probe.size) + ", " + std::to_string(probe.mips) + " mips)");
+}
+
+void App::finishGradingCapture() {
+    m_gradeCapturePending = false;
+    const std::filesystem::path folder = pathOf(m_project) / "art" / "grading";
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    const std::string png = utf8Of(folder / (sceneStem() + ".png")), cube = utf8Of(folder / "neutral.cube");
+    if (!std::filesystem::exists(pathOf(cube), ec)) {
+        std::ofstream out(pathOf(cube), std::ios::binary);
+        out << neutralCubeLut(kLutSize);
+    }
+    SDL_Surface* surface = m_gradeCapture.width ? SDL_CreateSurfaceFrom(static_cast<int>(m_gradeCapture.width), static_cast<int>(m_gradeCapture.height),
+                                                                      SDL_PIXELFORMAT_RGBA32, m_gradeCapture.rgba.data(),
+                                                                      static_cast<int>(m_gradeCapture.width * 4))
+                                                : nullptr;
+    const bool ok = surface && SDL_SavePNG(surface, png.c_str());
+    SDL_DestroySurface(surface);
+    log(ok ? "Grading capture saved: " + png + " (grade it with " + cube + ", export a .cube to assets/lut)" : "Cannot write " + png);
+}
+
+void App::renderOffscreen() {
+    Renderer& r = *m_renderer;
+    if (!m_probeQueue.empty() && m_bakeListReady) {
+        const Entity* e = m_scene.find(m_probeQueue.front());
+        if (!e) {
+            m_probeQueue.erase(m_probeQueue.begin());
+            m_probeFace = 0;
+            return;
+        }
+        if (!m_probeTarget || m_probeTargetSize != m_probeSize) { // a new size makes a new target (the renderer keeps the old one)
+            m_probeTarget = r.createRenderTarget(m_probeSize, m_probeSize);
+            m_probeTargetSize = m_probeSize;
+        }
+        const Vec3 eye = worldTransform(m_scene, *e).position, forward = cubeFaceForward(m_probeFace);
+        FrameParams frame = frameParams();
+        frame.viewport = {0.0f, 0.0f, static_cast<f32>(m_probeSize), static_cast<f32>(m_probeSize)};
+        frame.viewProj = lookAtLH(eye, eye + forward, cubeFaceUp(m_probeFace)) * perspectiveReversedZ(3.14159265f * 0.5f, 1.0f, 0.05f, 2000.0f);
+        frame.cameraPos = eye;
+        frame.cameraForward = forward;
+        frame.probes = nullptr; // other probes' old images don't mix in
+        frame.probeCount = 0;
+        frame.post.toneMapping = false; // reflections stay linear (tone mapping happens once on the screen that receives them)
+        r.drawToTarget(m_probeTarget, frame, m_bakeList, m_lighting);
+        r.captureTarget(m_probeTarget, &m_probeCapture);
+        m_probeCapturePending = true;
+        return; // one target capture per frame
+    }
+    if (m_gradeRequested && m_bakeListReady && m_time > 0.25) {
+        m_gradeRequested = false;
+        const u32 w = std::max(64u, static_cast<u32>(m_view.width)), h = std::max(64u, static_cast<u32>(m_view.height));
+        if (!m_gradeTarget || m_gradeSize[0] != w || m_gradeSize[1] != h) {
+            m_gradeTarget = r.createRenderTarget(w, h);
+            m_gradeSize[0] = w;
+            m_gradeSize[1] = h;
+        }
+        FrameParams frame = frameParams();
+        frame.viewport = {0.0f, 0.0f, static_cast<f32>(w), static_cast<f32>(h)};
+        frame.post.lut = 0; // the image before grading (up to tone mapping)
+        r.drawToTarget(m_gradeTarget, frame, m_bakeList, m_lighting);
+        r.captureTarget(m_gradeTarget, &m_gradeCapture);
+        m_gradeCapturePending = true;
+    }
+}
+
 void App::fill(DrawList& list) {
+    // Offscreen captures read back at the last endFrame
+    if (m_probeCapturePending) finishProbeFace();
+    if (m_gradeCapturePending) finishGradingCapture();
+    // Sky HDRI, LUT, reflection probes
+    const Environment& env = m_scene.environment;
+    m_environmentId = 0;
+    if (!env.hdri.empty()) {
+        const GpuEntry& g = m_assets.environment(env.hdri);
+        m_environmentId = g.id;
+        if (!g.error.empty()) reportProblem("Sky HDRI " + env.hdri + ": " + g.error);
+    }
+    m_lutId = 0;
+    const std::string lut = env.postValue("lut");
+    if (!lut.empty()) {
+        const GpuEntry& g = m_assets.lut(lut);
+        m_lutId = g.id;
+        if (!g.error.empty()) reportProblem("LUT " + lut + ": " + g.error);
+    }
+    m_probeList.clear();
+    for (const Entity& e : m_scene.entities) {
+        if (!e.is(kKindProbe) || e.field("bake").empty()) continue;
+        const GpuEntry& g = m_assets.probe(e.field("bake"));
+        if (!g.id) continue; // not baked yet: the sky reflection is used
+        const Transform w = worldTransform(m_scene, e);
+        m_probeList.push_back({w.position, Vec3{std::fabs(w.scale.x), std::fabs(w.scale.y), std::fabs(w.scale.z)} * 0.5f, g.id});
+    }
+    addScene(list);
+    // Probe faces and the grading capture draw the scene without selection highlight
+    m_bakeListReady = false;
+    const bool grade = m_gradeRequested && m_time > 0.25; // after the first frames, when the dock layout gives the view its size
+    if (!m_probeQueue.empty() || grade) {
+        if (!m_probeQueue.empty() && m_probeFace == 0) {
+            f32 size = 128.0f; // project setting probeSize, a power of two 16..512 (mips halve)
+            parseFloat(projectSetting("probeSize"), size);
+            m_probeSize = 16;
+            while (m_probeSize * 2 <= static_cast<u32>(std::clamp(size, 16.0f, 512.0f))) m_probeSize *= 2;
+        }
+        m_bakeList.clear();
+        fillScene(m_bakeList, false);
+        m_bakeListReady = true;
+    }
+}
+
+void App::addScene(DrawList& list) {
     m_lights.clear();
     for (const Entity& e : m_scene.entities) {
         if (m_hidden.count(e.id)) continue;
@@ -1305,6 +1491,17 @@ void App::drawMenu() {
             int model = static_cast<int>(m_lighting);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
             if (ImGui::Combo("Lighting model", &model, "PBR\0Toon\0Unlit\0")) setLightingModel(static_cast<LightingModel>(model));
+            ImGui::Separator();
+            if (ImGui::MenuItem("Bake reflection probes", nullptr, false, !bakingProbes() && !m_project.empty())) bakeProbes();
+            if (ImGui::MenuItem("Grading capture", nullptr, false, !m_project.empty())) requestGradingCapture();
+            bool compress = m_assets.compressTextures();
+            if (ImGui::MenuItem("Compress model textures (BC7/BC5)", nullptr, &compress)) {
+                m_assets.setCompressTextures(compress);
+                m_assets.reloadAll();
+                m_modelProblems.clear();
+                savePrefs();
+            }
+            ImGui::SetItemTooltip("Uses the engine's texture cache (build/cache/textures) and fills it when missing. Off: plain RGBA8");
             ImGui::Separator();
             if (ImGui::MenuItem("Reset layout")) layoutDocks(ImGui::GetID("MkRenderDock"));
             ImGui::EndMenu();
@@ -1708,6 +1905,13 @@ void App::drawInspector() {
             if (e.is(kKindScatter)) ImGui::TextDisabled("Draws the instances of its .scatter file (painting is in the MealKit editor for now).");
             if (!e.field("anim").empty()) ImGui::TextDisabled("The anim clip isn't played in MkRender (bind pose).");
             if (e.is(kKindTerrain)) ImGui::TextDisabled("The heightmap fills the object's box (scale). Brushes are in the MealKit editor.");
+            if (e.is(kKindProbe)) {
+                ImGui::BeginDisabled(bakingProbes() || m_project.empty());
+                if (ImGui::Button("Bake this probe")) bakeProbes(e.id);
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::TextDisabled(e.field("bake").empty() ? "not baked" : "box = influence area");
+            }
 
             ImGui::SeparatorText("Fields");
             drawFields(e);
@@ -1738,15 +1942,42 @@ void App::drawEnvironment() {
         ImGui::ColorEdit3("##fog", &env.fogColor.x, ImGuiColorEditFlags_Float);
         row("Fog density");
         ImGui::DragFloat("##fogd", &env.fogDensity, 0.0002f, 0.0f, 1.0f, "%.4f");
+        // A file picker over the project's files of one kind (assets/textures/**.hdr, assets/lut/**.cube) plus free text
+        const auto filePicker = [&](const char* id, std::string& value, const char* extension, const char* folder) {
+            bool changed = false;
+            ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() - ImGui::GetStyle().ItemSpacing.x);
+            changed |= inputString(id, value);
+            ImGui::SameLine();
+            if (ImGui::BeginCombo((std::string(id) + "pick").c_str(), nullptr, ImGuiComboFlags_NoPreview | ImGuiComboFlags_PopupAlignLeft)) {
+                if (ImGui::Selectable("(none)", value.empty())) value.clear(), changed = true;
+                for (const std::string& f : m_assets.files(extension))
+                    if (f.rfind(folder, 0) == 0 && ImGui::Selectable(f.c_str(), f == value)) value = f, changed = true;
+                ImGui::EndCombo();
+            }
+            return changed;
+        };
         ImGui::SeparatorText("Sky HDRI");
         row("HDRI file");
-        inputString("##hdri", env.hdri);
+        filePicker("##hdri", env.hdri, ".hdr", "textures/");
         if (!env.hdri.empty()) {
             row("Intensity");
             ImGui::DragFloat("##hdrii", &env.hdriIntensity, 0.01f, 0.0f, 16.0f);
             row("Rotation");
             ImGui::DragFloat("##hdrir", &env.hdriRotation, 0.5f, -360.0f, 360.0f, "%.1f deg");
-            ImGui::TextDisabled("MkRender doesn't bake HDRIs yet: the sky/ground colors are shown instead.");
+            if (!m_environmentId) ImGui::TextDisabled("Not loaded (see the log): the sky/ground colors are shown.");
+            else ImGui::TextDisabled("Baked once into build/cache/environments (the engine reads the same file).");
+        }
+        ImGui::SeparatorText("Reflection probes");
+        u32 probes = 0, baked = 0;
+        for (const Entity& e : m_scene.entities)
+            if (e.is(kKindProbe)) ++probes, baked += e.field("bake").empty() ? 0u : 1u;
+        ImGui::Text("%u in the scene, %u baked, %u drawn", probes, baked, static_cast<u32>(m_probeList.size()));
+        ImGui::BeginDisabled(probes == 0 || bakingProbes() || m_project.empty());
+        if (ImGui::Button("Bake probes")) bakeProbes();
+        ImGui::EndDisabled();
+        if (bakingProbes()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%u left", static_cast<u32>(m_probeQueue.size()));
         }
         ImGui::SeparatorText("Post-processing");
         const auto boolRow = [&](const char* key, const char* label) {
@@ -1775,8 +2006,12 @@ void App::drawEnvironment() {
         floatRow("chromaticAberration", "Chromatic aberr.", 0.0f, 0.03f);
         std::string lut = env.postValue("lut");
         row("Color LUT");
-        if (inputString("##lut", lut)) env.setPost("lut", lut);
-        if (!lut.empty()) ImGui::TextDisabled("LUTs aren't applied in MkRender yet.");
+        if (filePicker("##lut", lut, ".cube", "lut/")) env.setPost("lut", lut);
+        ImGui::BeginDisabled(m_project.empty());
+        if (ImGui::Button("Grading capture")) requestGradingCapture();
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Saves the view without the LUT to art/grading/<scene>.png with a neutral.cube beside it:\n"
+                              "grade both in Resolve or Photoshop, export a .cube into assets/lut and pick it here.");
     }
     ImGui::End();
 }

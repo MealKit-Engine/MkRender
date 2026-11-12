@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <cstring>
 #include <iterator>
+#include <system_error>
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -24,6 +26,31 @@ std::filesystem::path pathOf(const std::string& utf8) { return std::filesystem::
 std::string utf8Of(const std::filesystem::path& p) {
     const std::u8string s = p.u8string();
     return std::string(s.begin(), s.end());
+}
+
+long long writeTime(const std::string& path) {
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(pathOf(path), ec);
+    return ec ? -1 : static_cast<long long>(t.time_since_epoch().count());
+}
+
+bool readBytes(const std::string& path, std::string& out) {
+    std::ifstream in(pathOf(path), std::ios::binary);
+    if (!in) return false;
+    out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return true;
+}
+
+bool writeBytes(const std::string& path, const std::string& bytes) {
+    std::error_code ec;
+    std::filesystem::create_directories(pathOf(path).parent_path(), ec);
+    const std::string temp = path + ".tmp";
+    {
+        std::ofstream out(pathOf(temp), std::ios::binary | std::ios::trunc);
+        if (!out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) return false;
+    }
+    std::filesystem::rename(pathOf(temp), pathOf(path), ec); // replaces the old file
+    return !ec;
 }
 
 std::string lower(std::string s) {
@@ -96,7 +123,110 @@ void Assets::setAssetsDir(const std::string& dir) {
     m_assetsDir = dir;
     m_models.clear();
     m_terrains.clear();
+    m_environments.clear();
+    m_luts.clear();
+    m_probes.clear();
     m_scanned = false;
+}
+
+std::string Assets::cacheDir() const {
+    if (m_assetsDir.empty()) return {};
+    return utf8Of(pathOf(m_assetsDir).parent_path() / "build" / "cache");
+}
+
+const GpuEntry& Assets::environment(const std::string& hdri) {
+    TimedEntry& t = m_environments[hdri];
+    const std::string file = resolve(hdri);
+    const long long time = writeTime(file);
+    if (time == t.time && (t.entry.id || !t.entry.error.empty())) return t.entry;
+    t.time = time;
+    t.entry = {};
+    std::string bytes;
+    if (!readBytes(file, bytes)) {
+        t.entry.error = "cannot open " + hdri;
+        return t.entry;
+    }
+    EnvironmentMap map;
+    const std::string cache = cacheDir().empty() ? std::string() : cacheDir() + "/environments/" + environmentCacheName(bytes);
+    std::string cached;
+    if (cache.empty() || !readBytes(cache, cached) || !readEnvironmentFile(cached, map)) {
+        int w = 0, h = 0, comp = 0;
+        f32* rgb = stbi_loadf_from_memory(reinterpret_cast<const stbi_uc*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h, &comp, 3);
+        if (!rgb) {
+            t.entry.error = std::string("HDR image: ") + stbi_failure_reason();
+            return t.entry;
+        }
+        bakeEnvironment(rgb, static_cast<u32>(w), static_cast<u32>(h), map);
+        stbi_image_free(rgb);
+        if (!cache.empty() && !writeBytes(cache, environmentFileBytes(map))) t.entry.error = "baked, but cannot write " + cache;
+    }
+    EnvironmentData data;
+    std::memcpy(data.sh, map.sh, sizeof(data.sh));
+    data.skySize = map.skySize;
+    data.sky = map.sky.data();
+    data.reflectSize = map.reflectSize;
+    data.reflectMips = map.reflectMips;
+    data.reflect = map.reflect.data();
+    t.entry.id = m_renderer->createEnvironment(data);
+    return t.entry;
+}
+
+const GpuEntry& Assets::lut(const std::string& cube) {
+    TimedEntry& t = m_luts[cube];
+    const std::string file = resolve(cube);
+    const long long time = writeTime(file);
+    if (time == t.time && (t.entry.id || !t.entry.error.empty())) return t.entry;
+    t.time = time;
+    t.entry = {};
+    std::string text;
+    std::vector<f32> cells;
+    if (!readBytes(file, text)) t.entry.error = "cannot open " + cube;
+    else if (parseCubeLut(text, kLutSize, cells, t.entry.error)) t.entry.id = m_renderer->createLut(cells.data());
+    return t.entry;
+}
+
+const GpuEntry& Assets::probe(const std::string& path) {
+    TimedEntry& t = m_probes[path];
+    const std::string file = resolve(path);
+    const long long time = writeTime(file);
+    if (time == t.time && (t.entry.id || !t.entry.error.empty())) return t.entry;
+    t.time = time;
+    t.entry = {};
+    std::string bytes;
+    ProbeMap map;
+    if (!readBytes(file, bytes)) t.entry.error = "not baked yet (" + path + ")";
+    else if (readProbeFile(bytes, map, t.entry.error)) t.entry.id = m_renderer->createProbe(map.size, map.mips, map.reflect.data());
+    return t.entry;
+}
+
+u32 Assets::uploadTexture(const TextureImage& image) {
+    mkrhi::TextureInit init;
+    if (m_compress && !image.encoded.empty()) {
+        const TextureUsage usage = static_cast<TextureUsage>(image.usage);
+        const std::string cache = cacheDir().empty() ? std::string()
+                                                     : cacheDir() + "/textures/" + textureCacheName(image.encoded.data(), image.encoded.size(), usage);
+        std::string bytes;
+        CompressedTexture c;
+        bool ok = !cache.empty() && readBytes(cache, bytes) && readTextureFile(bytes, c);
+        if (!ok && compressTexture(image.rgba.data(), image.width, image.height, usage, c)) {
+            ok = true;
+            if (!cache.empty()) writeBytes(cache, textureFileBytes(c));
+        }
+        if (ok) {
+            init.width = c.width;
+            init.height = c.height;
+            init.mipLevels = c.mipLevels;
+            init.format = c.format;
+            init.data = c.data.data();
+            return m_renderer->createTexture(init);
+        }
+    }
+    const std::vector<u8> mips = buildMips(image, init.mipLevels);
+    init.width = image.width;
+    init.height = image.height;
+    init.format = image.srgb ? mkrhi::Format::Rgba8Srgb : mkrhi::Format::Rgba8Unorm;
+    init.data = mips.data();
+    return m_renderer->createTexture(init);
 }
 
 std::string Assets::resolve(const std::string& path) const {
@@ -122,15 +252,7 @@ const ModelEntry& Assets::model(const std::string& path) {
     if (!loadGltf(resolve(path), data, entry.error)) return entry;
     Renderer& r = *m_renderer;
     std::vector<u32> textures;
-    for (const TextureImage& image : data.images) {
-        mkrhi::TextureInit init;
-        const std::vector<u8> mips = buildMips(image, init.mipLevels);
-        init.width = image.width;
-        init.height = image.height;
-        init.format = image.srgb ? mkrhi::Format::Rgba8Srgb : mkrhi::Format::Rgba8Unorm;
-        init.data = mips.data();
-        textures.push_back(r.createTexture(init));
-    }
+    for (const TextureImage& image : data.images) textures.push_back(uploadTexture(image));
     const auto tex = [&](u32 i) { return i < textures.size() ? textures[i] : kNoTexture; };
     std::vector<u32> materials;
     for (MaterialData d : data.materials) {
@@ -163,6 +285,9 @@ void Assets::reloadAll() {
     m_terrains.clear();
     m_images.clear();
     m_sprites.clear();
+    m_environments.clear();
+    m_luts.clear();
+    m_probes.clear();
     m_scatters.clear();
 }
 

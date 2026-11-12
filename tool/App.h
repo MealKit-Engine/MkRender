@@ -26,6 +26,8 @@ public:
     void frame(f64 dt); // between ImGui::NewFrame and ImGui::Render
     FrameParams frameParams() const;
     void fill(DrawList& list);
+    // After the main view's DrawList::submit, before UI: reflection probe faces and the grading capture (offscreen targets)
+    void renderOffscreen();
     bool drawUi() const { return !m_hideUiThisFrame; }
     void afterFrame();
 
@@ -41,6 +43,12 @@ public:
     void saveScreenshot(const std::string& path, bool withUi);
     void requestQuit();
     bool canQuit() const { return m_quitConfirmed; }
+    // Reflection probes (scene reflection_probe objects): six faces each, one per frame, baked with mkbake into
+    // assets/probes/<scene>_<id>.mkprobe (the editor's files and names), and the object's "bake" field set. 0 = all
+    void bakeProbes(u32 onlyId = 0);
+    bool bakingProbes() const { return !m_probeQueue.empty(); }
+    // The view without LUT to art/grading/<scene>.png, with art/grading/neutral.cube beside it (grade it, export a .cube to assets/lut)
+    void requestGradingCapture() { m_gradeRequested = true; }
 
 private:
     enum class Pending { None, Quit, OpenPath, NewScene };
@@ -183,6 +191,29 @@ private:
 
     LightingModel m_lighting = LightingModel::Pbr;
     std::vector<PointLight> m_lights;
+    // Sky HDRI, LUT and probes of this frame (fill() resolves them, frameParams() passes them)
+    u32 m_environmentId = 0, m_lutId = 0;
+    std::vector<ReflectionProbe> m_probeList;
+    void reportProblem(const std::string& what); // logged once
+    std::string sceneStem() const;
+    void addScene(DrawList& list); // objects, point lights
+    void fillScene(DrawList& list, bool highlight);
+    // Probe baking and grading capture
+    std::vector<u32> m_probeQueue;
+    u32 m_probeFace = 0, m_probeSize = 0;
+    mkrhi::RenderTarget m_probeTarget{};
+    u32 m_probeTargetSize = 0;
+    bool m_probeCapturePending = false;
+    Image m_probeCapture;
+    std::vector<f32> m_probeFaces;
+    DrawList m_bakeList;
+    bool m_bakeListReady = false;
+    bool m_gradeRequested = false, m_gradeCapturePending = false;
+    mkrhi::RenderTarget m_gradeTarget{};
+    u32 m_gradeSize[2] = {};
+    Image m_gradeCapture;
+    void finishProbeFace();
+    void finishGradingCapture();
     std::vector<std::string> m_modelProblems; // model files that failed (logged once)
 
     // Status

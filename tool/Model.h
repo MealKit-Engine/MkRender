@@ -12,6 +12,8 @@ namespace mkrender::tool {
 struct TextureImage {
     u32 width = 0, height = 0;
     bool srgb = true;
+    u8 usage = 0;         // mkrender::TextureUsage (Color, Linear, Normal): picks BC7 sRGB / BC7 / BC5
+    std::string encoded;  // PNG/JPEG bytes as in the glTF (the texture cache name is their hash, like the engine's)
     std::vector<u8> rgba;
 };
 

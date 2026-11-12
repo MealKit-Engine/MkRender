@@ -8,6 +8,7 @@ The renderer of the [MealKit](https://github.com/MealKit-Engine/MealKit) engine 
 |---|---|
 | `mkrhi` | Thin graphics layer over DX12 (reference) or Vulkan 1.3: device and swap chain from a native window handle, frame command lists, static buffers, textures, offscreen and depth targets, pipelines with one bindless binding layout, a per-frame upload ring, GPU timestamps, back buffer capture, an on-disk pipeline cache |
 | `mkrender` | Forward renderer on `mkrhi` with plain inputs: meshes, materials, 48-byte instances, point lights, camera, sprites, particles, UI quads; PBR/toon/unlit lighting, sun shadows (CSM), sky HDRI and reflection probes, bloom/AgX/LUT post, dynamic resolution, frustum culling in `DrawList`. Shaders (`shaders/`) are compiled to byte arrays at build time |
+| `mkbake` | CPU baking without GPU or files (`include/mkrender/Bake.h`): sky HDRI (sky cube, reflection cube with GGX mips, SH ambient), reflection probes from six rendered faces (`.mkprobe`), `.cube` LUTs, texture mips and BC7/BC5 (bc7enc/rgbcx), and the cache file bytes and names. The MealKit engine and the scene editor both bake with it, so their caches are the same files |
 
 **MkRender** (`build/bin/MkRender.exe`) is a scene editor built on them, like MkUI for `.ui` screens and MkAudio for sound events: it opens a MealKit project's `.scene` files with a hierarchy, a viewport and an inspector, and saves them for the engine (below).
 
@@ -86,11 +87,13 @@ A host that already has a `Vec3`/`Quat`/`Mat4`, a vertex and material struct or 
 
 The file is written the way the engine's scene module writes it (same keys, order, shortest float text, `field` lines), so a scene the engine saved comes back byte for byte, and older formats are upgraded like the engine does. Game kinds' fields are kept as text, so nothing is lost without the game's code. When the project has `build/editor/kinds.txt` (written by the MealKit editor when it loads the game code, or `<game>_headless --write-kinds`; MealKit-Contract "Object kinds"), MkRender uses it for kind names, the [Add] menu, field labels, typed widgets and defaults, and rereads it when it changes.
 
-Editing beyond one object: Shift/Ctrl click and box select, Edit > Arrange (align, distribute), Drop to floor (End), hide (H) and lock, camera bookmarks (Ctrl+1..9 / 1..9) kept in the project's `build/editor/<scene>.view` like the MealKit editor, grid (G) and snap steps (View > Grid and snap), recent scenes, autosave to `build/editor/autosave/`. The Assets window places models, prefabs and PNG sprites by dragging into the view and finds where a file is used; Edit > Save selection as prefab writes `assets/prefabs/<name>.prefab`. Sprites, scatter layers and virtual camera frustums are drawn. Terrain draws its heightmap; HDRIs/LUTs aren't applied yet (their values are still edited and saved).
+Editing beyond one object: Shift/Ctrl click and box select, Edit > Arrange (align, distribute), Drop to floor (End), hide (H) and lock, camera bookmarks (Ctrl+1..9 / 1..9) kept in the project's `build/editor/<scene>.view` like the MealKit editor, grid (G) and snap steps (View > Grid and snap), recent scenes, autosave to `build/editor/autosave/`. The Assets window places models, prefabs and PNG sprites by dragging into the view and finds where a file is used; Edit > Save selection as prefab writes `assets/prefabs/<name>.prefab`. Sprites, scatter layers and virtual camera frustums are drawn. Terrain draws its heightmap.
+
+Rendering parts like the engine: the sky HDRI (baked once into the project's `build/cache/environments/`, the file the engine reads), the color LUT, reflection probes from their `.mkprobe` files, and model textures as BC7/BC5 from the engine's texture cache (`build/cache/textures/`, filled when missing; View > Compress model textures turns it off). [Bake probes] in the Environment window (or the probe's inspector) renders six faces per probe and writes `assets/probes/<scene>_<id>.mkprobe`, the editor's files. [Grading capture] saves the view without the LUT to `art/grading/<scene>.png` with a `neutral.cube` beside it, to grade in an external tool and export into `assets/lut/`.
 
 ```
 MkRender [--project <folder>] [--file <.scene|.gltf|.glb>] [--select <id>] [--lighting pbr|toon|unlit]
-         [--debug-layer] [--frames N --capture out.png] [--version]
+         [--debug-layer] [--frames N --capture out.png] [--bake-probes] [--grading-capture] [--version]
 MkRender --check-scene <file.scene>   # read + write in memory: same / upgraded / FAIL with the first differing line
 ```
 
@@ -114,15 +117,16 @@ Options for a host project that adds it with `add_subdirectory`:
 | `MKRENDER_OBJECT_LIBRARIES` | `ON` builds OBJECT libraries (for a host DLL that exports every symbol) |
 | `MKRENDER_DXC` | `dxc` with SPIR-V support (default: on `PATH` or MealKit's download cache). Without it only `mkrhi` is built |
 | `MKRENDER_USER_CONFIG`, `MKRENDER_USER_CONFIG_INCLUDE_DIRS` | your own types (above) and the folders that header needs |
+| `MKBAKE_BC`, `MKBAKE_BC7ENC_DIR` | BC7/BC5 compression in `mkbake` (default on) and the bc7enc folder (default `third_party/bc7enc`) |
 | `MKRENDER_BUILD_TOOL` | the scene editor (default: on when built standalone on Windows; it needs `mkrender`, so a DXC) |
 
-`third_party/` holds what the standalone build and the scene editor use: Vulkan-Headers, volk, VMA, SDL3, Dear ImGui (docking), ImGuizmo, cgltf and stb_image, each with its license. A host that adds MkRender with `add_subdirectory` uses its own copies through the variables above.
+`third_party/` holds what the standalone build and the scene editor use: Vulkan-Headers, volk, VMA, SDL3, Dear ImGui (docking), ImGuizmo, cgltf, stb_image and bc7enc (`mkbake`), each with its license. A host that adds MkRender with `add_subdirectory` uses its own copies through the variables above.
 
 GPU capture tools (RenderDoc, PIX) are loaded by the host from `DeviceDesc::beforeDeviceCreate`, which runs right before the device is made.
 
 ## In MealKit
 
-The engine pins a copy in `third_party/mkrender` (`tools\update_mkrender.ps1 -From <checkout>`) and wraps it in the engine modules `rhi` (`mealkit::rhi`, engine log, capture tools) and `render` (`render::Renderer` with the job system, shader hot reload, PNG screenshots; model, texture, sky and sprite loading from engine assets). To work on both, configure the engine with `-DMEALKIT_MKRENDER_DIR=<checkout>`.
+The engine pins a copy in `third_party/mkrender` (`tools\update_mkrender.ps1 -From <checkout>`) and wraps it in the engine modules `rhi` (`mealkit::rhi`, engine log, capture tools) and `render` (`render::Renderer` with the job system, shader hot reload, PNG screenshots; model, texture, sky and sprite loading from engine assets; the texture and environment caches and probe files through `mkbake`). To work on both, configure the engine with `-DMEALKIT_MKRENDER_DIR=<checkout>`.
 
 ## License
 

@@ -6,7 +6,7 @@
 set(imguizmo ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imguizmo/ImGuizmo.cpp)
 add_executable(MkRender WIN32 main.cpp App.h App.cpp Assets.h Assets.cpp Model.h Model.cpp SceneFile.h SceneFile.cpp ${imguizmo})
 target_include_directories(MkRender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imguizmo)
-target_link_libraries(MkRender PRIVATE mkrender mkrender_imgui SDL3::SDL3-static)
+target_link_libraries(MkRender PRIVATE mkrender mkbake mkrender_imgui SDL3::SDL3-static)
 target_include_directories(MkRender SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cgltf ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb)
 if(MSVC)
     target_compile_options(MkRender PRIVATE /W4 /permissive- /utf-8)

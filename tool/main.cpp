@@ -1,7 +1,7 @@
 // MkRender executable: SDL3 window, mkrender drawing into it (DX12 or Vulkan, the backend MkRender was built with),
 // Dear ImGui panels drawn by mkrhi's ImGui backend. The actual screen is App (scene editor).
 //   MkRender [--project <MealKit project folder>] [--file <.scene|.gltf|.glb>] [file] [--select <id>[,<id>...]]
-//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--version]
+//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--version]
 //   MkRender --check-scene <file.scene>   reads and writes the scene in memory: "SCENE same" when the text comes back
 //            unchanged, "SCENE equal" when only float text differs (old %.9g files), else the first differing line (exit 1)
 #include "App.h"
@@ -137,6 +137,7 @@ int checkScene(const std::string& path) {
 
 int main(int argc, char** argv) {
     std::string project, file, capture;
+    bool bakeProbes = false, gradingCapture = false; // --bake-probes, --grading-capture: run once after opening (with --frames for scripts)
     long frames = 0; // --frames N: quit after N frames (--capture saves the last one as PNG, for docs and tests)
     std::string selectIds; // --select 5 or 5,7,9
     bool debugLayer = false;
@@ -148,6 +149,8 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--file") == 0 && i + 1 < argc) file = argv[++i];
         else if (std::strcmp(argv[i], "--select") == 0 && i + 1 < argc) selectIds = argv[++i];
         else if (std::strcmp(argv[i], "--debug-layer") == 0) debugLayer = true;
+        else if (std::strcmp(argv[i], "--bake-probes") == 0) bakeProbes = true;
+        else if (std::strcmp(argv[i], "--grading-capture") == 0) gradingCapture = true;
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
@@ -226,6 +229,8 @@ int main(int argc, char** argv) {
         else app.addToSelection(static_cast<mkrender::u32>(id));
         c = *end == ',' ? end + 1 : end;
     }
+    if (bakeProbes) app.bakeProbes();
+    if (gradingCapture) app.requestGradingCapture();
 
     mkrender::DrawList list;
     Uint64 last = SDL_GetPerformanceCounter();
@@ -271,6 +276,7 @@ int main(int argc, char** argv) {
         app.fill(list); // before beginFrame: may upload models and terrain
         if (renderer.beginFrame(app.frameParams())) {
             list.submit(renderer);
+            app.renderOffscreen();
             renderer.beginOverlay();
             if (app.drawUi()) mkrhi::imguiRender(renderer.device());
             renderer.endFrame();

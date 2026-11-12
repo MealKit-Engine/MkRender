@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mkrender/Bake.h"
 #include "mkrender/Renderer.h"
 
 #include <map>
@@ -37,6 +38,14 @@ struct ScatterEntry {
     std::string error;
 };
 
+struct TextureImage;
+
+// Sky HDRI, LUT and reflection probe uploads (index 0 = none, error says why)
+struct GpuEntry {
+    u32 id = 0;
+    std::string error;
+};
+
 class Assets {
 public:
     void init(Renderer& renderer);
@@ -56,6 +65,18 @@ public:
     const SpriteEntry& sprite(const std::string& image, int columns, int rows, int cell, f32 pivotX, f32 pivotY, bool flipX, bool flipY);
     // Scatter file (reread when it changes on disk)
     const ScatterEntry& scatter(const std::string& file);
+
+    // Sky HDRI: the engine's environment cache (<project>/build/cache/environments/<hash>.mkenv, mkbake) or baked here and written there
+    const GpuEntry& environment(const std::string& hdri);
+    // Color grading LUT (.cube), reread when it changes
+    const GpuEntry& lut(const std::string& cube);
+    // Reflection probe file (.mkprobe), reread when it changes (a bake writes it again)
+    const GpuEntry& probe(const std::string& file);
+    // Model textures as BC7/BC5 from the engine's texture cache (<project>/build/cache/textures/<hash>.mktex), compressed here when missing.
+    // Off: RGBA8 with mips (faster first load of a big project). Takes effect on Reload models
+    void setCompressTextures(bool on) { m_compress = on; }
+    bool compressTextures() const { return m_compress; }
+    std::string cacheDir() const; // <project>/build/cache (empty without a project)
 
     // Model files under assets (relative paths, sorted). Scanned on first call and by rescan()
     const std::vector<std::string>& modelFiles();
@@ -84,6 +105,13 @@ private:
         long long time = 0;
     };
     std::map<std::string, ScatterFile> m_scatters;
+    struct TimedEntry {
+        GpuEntry entry;
+        long long time = 0;
+    };
+    std::map<std::string, TimedEntry> m_environments, m_luts, m_probes;
+    bool m_compress = true;
+    u32 uploadTexture(const TextureImage& image);
     MeshId m_box = kNoMesh;
     std::vector<std::string> m_modelFiles;
     bool m_scanned = false;

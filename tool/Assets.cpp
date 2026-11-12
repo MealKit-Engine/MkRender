@@ -58,59 +58,6 @@ std::string lower(std::string s) {
     return s;
 }
 
-// 16-bit (or 8-bit) grayscale PNG -> square sample grid, z = 0 at the -z edge (the image's top row is +z), like asset/Terrain.h
-bool loadHeightmap(const std::string& file, u32& size, std::vector<u16>& samples, std::string& error) {
-    std::ifstream in(pathOf(file), std::ios::binary);
-    if (!in) {
-        error = "cannot open " + file;
-        return false;
-    }
-    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    int w = 0, h = 0, comp = 0;
-    stbi_us* pixels = stbi_load_16_from_memory(reinterpret_cast<const stbi_uc*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h, &comp, 1);
-    if (!pixels) {
-        error = std::string("heightmap: ") + stbi_failure_reason();
-        return false;
-    }
-    if (w != h || w < 2) {
-        stbi_image_free(pixels);
-        error = "heightmap must be square";
-        return false;
-    }
-    size = static_cast<u32>(w);
-    samples.resize(static_cast<size_t>(w) * h);
-    for (int z = 0; z < h; ++z)
-        for (int x = 0; x < w; ++x) samples[static_cast<size_t>(z) * w + x] = pixels[static_cast<size_t>(h - 1 - z) * w + x];
-    stbi_image_free(pixels);
-    return true;
-}
-
-MeshData terrainMesh(u32 n, const std::vector<u16>& s, Vec3 size) {
-    MeshData mesh;
-    const auto pos = [&](u32 x, u32 z) {
-        return Vec3{-size.x * 0.5f + static_cast<f32>(x) * size.x / static_cast<f32>(n - 1),
-                    -size.y * 0.5f + static_cast<f32>(s[static_cast<size_t>(z) * n + x]) / 65535.0f * size.y,
-                    -size.z * 0.5f + static_cast<f32>(z) * size.z / static_cast<f32>(n - 1)};
-    };
-    mesh.vertices.resize(static_cast<size_t>(n) * n);
-    for (u32 z = 0; z < n; ++z)
-        for (u32 x = 0; x < n; ++x) {
-            Vertex& v = mesh.vertices[static_cast<size_t>(z) * n + x];
-            v.position = pos(x, z);
-            const Vec3 dx = pos(std::min(x + 1, n - 1), z) - pos(x > 0 ? x - 1 : 0, z);
-            const Vec3 dz = pos(x, std::min(z + 1, n - 1)) - pos(x, z > 0 ? z - 1 : 0);
-            v.normal = normalize(cross(dz, dx));
-            v.uv = packHalf2(static_cast<f32>(x) / static_cast<f32>(n - 1), static_cast<f32>(z) / static_cast<f32>(n - 1));
-        }
-    for (u32 z = 0; z + 1 < n; ++z)
-        for (u32 x = 0; x + 1 < n; ++x) {
-            const u32 a = z * n + x, b = a + 1, c = a + n, d = c + 1;
-            // Front faces: cross(b - a, c - a) points up (the same rule as the engine's meshes)
-            mesh.indices.insert(mesh.indices.end(), {a, c, b, b, c, d});
-        }
-    return mesh;
-}
-
 } // namespace
 
 void Assets::init(Renderer& renderer) {
@@ -361,49 +308,145 @@ const SpriteEntry& Assets::sprite(const std::string& image, int columns, int row
 
 const ScatterEntry& Assets::scatter(const std::string& file) {
     ScatterFile& f = m_scatters[file];
-    std::error_code ec;
-    const auto t = std::filesystem::last_write_time(pathOf(resolve(file)), ec);
-    const long long time = ec ? -1 : static_cast<long long>(t.time_since_epoch().count());
-    if (time == f.time && (time != 0)) return f.entry;
+    if (f.entry.dirty) return f.entry; // painted: the memory copy wins until saved
+    const long long time = writeTime(resolve(file));
+    if (time == f.time && time != 0) return f.entry;
     f.time = time;
     f.entry = {};
-    if (time == -1) {
+    std::string text;
+    if (time == -1 || !readBytes(resolve(file), text)) {
         f.entry.error = "cannot open " + file;
         return f.entry;
     }
-    std::ifstream in(pathOf(resolve(file)), std::ios::binary);
-    std::string line;
-    while (std::getline(in, line)) {
-        ScatterItem item;
-        if (std::sscanf(line.c_str(), " i %f %f %f %f %f", &item.position.x, &item.position.y, &item.position.z, &item.yaw, &item.scale) == 5)
-            f.entry.items.push_back(item);
-    }
+    readScatter(text, f.entry.items, f.entry.error);
     return f.entry;
 }
 
-MeshId Assets::terrain(u32 entityId, const std::string& heightmap, Vec3 size, std::string* error) {
-    TerrainEntry& t = m_terrains[entityId];
-    const bool same = t.heightmap == heightmap && t.size.x == size.x && t.size.y == size.y && t.size.z == size.z;
-    if (!same || (t.mesh == kNoMesh && t.error.empty())) {
-        t.heightmap = heightmap;
-        t.size = size;
-        t.error.clear();
-        u32 n = 0;
-        std::vector<u16> samples;
-        if (heightmap.empty()) {
-            n = 2;
-            samples.assign(4, 0);
-        } else if (!loadHeightmap(resolve(heightmap), n, samples, t.error)) {
-            n = 0;
-        }
-        if (n) {
-            const MeshData mesh = terrainMesh(n, samples, size);
-            if (t.mesh == kNoMesh) t.mesh = m_renderer->createMesh(mesh);
-            else m_renderer->replaceMesh(t.mesh, mesh);
-        }
+ScatterEntry& Assets::scatterEdit(const std::string& file) {
+    scatter(file);
+    ScatterEntry& e = m_scatters[file].entry;
+    e.error.clear(); // a missing file is a new layer
+    e.dirty = true;
+    return e;
+}
+
+Assets::HeightmapFile& Assets::heightmapFile(const std::string& path) {
+    HeightmapFile& h = m_heightmaps[path];
+    if (h.dirty) return h;
+    const long long time = writeTime(resolve(path));
+    if (time == h.time && (h.map.valid() || !h.error.empty())) return h;
+    h.time = time;
+    h.error.clear();
+    h.map = {};
+    ++h.generation;
+    std::string bytes;
+    if (!readBytes(resolve(path), bytes)) h.error = "cannot open " + path;
+    else if (!decodeHeightmap(reinterpret_cast<const u8*>(bytes.data()), bytes.size(), h.map, h.error)) h.error = path + ": " + h.error;
+    return h;
+}
+
+Heightmap* Assets::heightmap(const std::string& path) {
+    if (path.empty()) return nullptr;
+    HeightmapFile& h = heightmapFile(path);
+    return h.map.valid() ? &h.map : nullptr;
+}
+
+void Assets::createHeightmap(const std::string& path, Heightmap map) {
+    HeightmapFile& h = m_heightmaps[path];
+    h.map = std::move(map);
+    h.error.clear();
+    h.dirty = true;
+    ++h.generation;
+}
+
+void Assets::heightmapEdited(const std::string& path, const SampleRect& rect) {
+    HeightmapFile& h = m_heightmaps[path];
+    h.dirty = true;
+    u32 x0, z0, x1, z1;
+    if (!chunksOf(h.map, rect, x0, z0, x1, z1)) return;
+    const u32 n = terrainChunks(h.map);
+    MeshData mesh;
+    for (auto& [id, t] : m_terrains) {
+        if (t.heightmap != path || t.generation != h.generation || t.view.chunks.size() != static_cast<size_t>(n) * n) continue;
+        for (u32 z = z0; z <= z1; ++z)
+            for (u32 x = x0; x <= x1; ++x) {
+                buildTerrainChunk(h.map, t.size, x, z, 0, mesh);
+                m_renderer->replaceMesh(t.view.chunks[static_cast<size_t>(z) * n + x], mesh);
+            }
     }
-    if (error) *error = t.error;
-    return t.error.empty() ? t.mesh : kNoMesh;
+}
+
+bool Assets::hasUnsavedEdits() const {
+    for (const auto& [path, h] : m_heightmaps)
+        if (h.dirty) return true;
+    for (const auto& [path, f] : m_scatters)
+        if (f.entry.dirty) return true;
+    return false;
+}
+
+bool Assets::saveEdits(std::string& error) {
+    bool ok = true;
+    for (auto& [path, h] : m_heightmaps) {
+        if (!h.dirty || !h.map.valid()) continue;
+        const std::vector<u8> png = encodeHeightmap(h.map);
+        if (!writeBytes(resolve(path), std::string(png.begin(), png.end()))) {
+            error += "cannot write " + path + "\n";
+            ok = false;
+            continue;
+        }
+        h.dirty = false;
+        h.time = writeTime(resolve(path));
+    }
+    for (auto& [path, f] : m_scatters) {
+        if (!f.entry.dirty) continue;
+        if (!writeBytes(resolve(path), scatterText(f.entry.items))) {
+            error += "cannot write " + path + "\n";
+            ok = false;
+            continue;
+        }
+        f.entry.dirty = false;
+        f.time = writeTime(resolve(path));
+    }
+    return ok;
+}
+
+void Assets::discardEdits() {
+    for (auto it = m_heightmaps.begin(); it != m_heightmaps.end();) it = it->second.dirty ? m_heightmaps.erase(it) : std::next(it);
+    for (auto it = m_scatters.begin(); it != m_scatters.end();) it = it->second.entry.dirty ? m_scatters.erase(it) : std::next(it);
+}
+
+const TerrainView& Assets::terrain(u32 entityId, const std::string& heightmap, Vec3 size) {
+    TerrainEntry& t = m_terrains[entityId];
+    static const Heightmap kFlat = flatHeightmap(2, 0); // no heightmap yet: a flat box bottom
+    const Heightmap* map = &kFlat;
+    u32 generation = 0;
+    std::string error;
+    if (!heightmap.empty()) {
+        HeightmapFile& h = heightmapFile(heightmap);
+        map = h.map.valid() ? &h.map : nullptr;
+        generation = h.generation;
+        error = h.error;
+    }
+    const bool same = t.heightmap == heightmap && t.size.x == size.x && t.size.y == size.y && t.size.z == size.z && t.generation == generation;
+    t.view.map = map;
+    t.view.error = error;
+    if (same) return t.view;
+    t.heightmap = heightmap;
+    t.size = size;
+    t.generation = generation;
+    if (!map) return t.view;
+    const u32 n = terrainChunks(*map);
+    MeshData mesh;
+    for (u32 z = 0; z < n; ++z)
+        for (u32 x = 0; x < n; ++x) {
+            buildTerrainChunk(*map, size, x, z, 0, mesh);
+            const size_t i = static_cast<size_t>(z) * n + x;
+            if (i < t.view.chunks.size()) m_renderer->replaceMesh(t.view.chunks[i], mesh);
+            else t.view.chunks.push_back(m_renderer->createMesh(mesh));
+        }
+    // Fewer chunks than before (a smaller map): the extra meshes stay allocated but aren't drawn
+    t.view.chunks.resize(static_cast<size_t>(n) * n);
+    return t.view;
 }
 
 const std::vector<std::string>& Assets::modelFiles() {

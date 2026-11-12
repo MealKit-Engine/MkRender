@@ -2,6 +2,7 @@
 // Dear ImGui panels drawn by mkrhi's ImGui backend. The actual screen is App (scene editor).
 //   MkRender [--project <MealKit project folder>] [--file <.scene|.gltf|.glb>] [file] [--select <id>[,<id>...]]
 //            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--version]
+//   MkRender --check-terrain <file.png|file.scatter>   decodes and encodes with mkterrain: "TERRAIN same" when the bytes come back
 //   MkRender --check-scene <file.scene>   reads and writes the scene in memory: "SCENE same" when the text comes back
 //            unchanged, "SCENE equal" when only float text differs (old %.9g files), else the first differing line (exit 1)
 #include "App.h"
@@ -45,6 +46,33 @@ void loadFont(float size) {
     ImFontConfig config;
     config.SizePixels = size;
     io.Fonts->AddFontDefaultVector(&config);
+}
+
+// --check-terrain <file.png|file.scatter>: decode + encode with mkterrain, "TERRAIN same" when the bytes come back unchanged
+// (files the engine or the editor wrote), else "TERRAIN differs" (exit 1)
+int checkTerrain(const std::string& path) {
+    std::ifstream in(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string error, again;
+    if (path.size() > 8 && path.compare(path.size() - 8, 8, ".scatter") == 0) {
+        std::vector<mkrender::ScatterInstance> items;
+        if (!mkrender::readScatter(bytes, items, error)) return std::printf("TERRAIN FAIL %s\n", error.c_str()), 1;
+        again = mkrender::scatterText(items);
+        std::string unix;
+        for (char c : bytes)
+            if (c != '\r') unix += c;
+        std::printf("TERRAIN %s (%zu instances)\n", again == unix ? "same" : "differs", items.size());
+        return again == unix ? 0 : 1;
+    }
+    mkrender::Heightmap map;
+    if (!mkrender::decodeHeightmap(reinterpret_cast<const mkrender::u8*>(bytes.data()), bytes.size(), map, error))
+        return std::printf("TERRAIN FAIL %s\n", error.c_str()), 1;
+    const std::vector<mkrender::u8> png = mkrender::encodeHeightmap(map);
+    const bool same = std::string(png.begin(), png.end()) == bytes;
+    mkrender::Heightmap back; // another encoder (a script, an image editor): the samples must still come back
+    const bool sameSamples = mkrender::decodeHeightmap(png.data(), png.size(), back, error) && back.samples == map.samples;
+    std::printf("TERRAIN %s (%u x %u samples)\n", same ? "same" : sameSamples ? "same samples (other encoder)" : "differs", map.size, map.size);
+    return sameSamples ? 0 : 1;
 }
 
 int checkScene(const std::string& path) {
@@ -152,6 +180,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--bake-probes") == 0) bakeProbes = true;
         else if (std::strcmp(argv[i], "--grading-capture") == 0) gradingCapture = true;
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
+        else if (std::strcmp(argv[i], "--check-terrain") == 0 && i + 1 < argc) return checkTerrain(argv[++i]);
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
             lighting = v == "toon" ? 1 : v == "unlit" ? 2 : 0;

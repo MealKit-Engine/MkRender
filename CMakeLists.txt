@@ -15,7 +15,7 @@
 #   MKRENDER_USER_CONFIG       header with the host's own math/mesh/image types (include/mkrender/Config.h), and
 #   MKRENDER_USER_CONFIG_INCLUDE_DIRS  the folders it needs
 cmake_minimum_required(VERSION 3.25)
-project(mkrender VERSION 0.7.0 LANGUAGES C CXX)
+project(mkrender VERSION 0.8.0 LANGUAGES C CXX)
 
 set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
 set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)
@@ -124,6 +124,29 @@ if(MSVC)
     endif()
 else()
     target_compile_options(mkbake PRIVATE -Wall -Wextra)
+endif()
+
+# --- mkterrain ---
+# Heightmap terrain and scatter layers as data (include/mkrender/Terrain.h): PNG heightmaps, surface height and ray hits, chunk meshes,
+# brushes, scatter text and painting. Its own static stb_image/stb_image_write from MKTERRAIN_STB_DIR (default third_party/stb).
+if(NOT MKTERRAIN_STB_DIR)
+    set(MKTERRAIN_STB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+endif()
+add_library(mkterrain ${mkrender_lib_type} include/mkrender/Terrain.h src/mkterrain/Terrain.cpp)
+target_include_directories(mkterrain PUBLIC include)
+target_include_directories(mkterrain SYSTEM PRIVATE ${MKTERRAIN_STB_DIR})
+target_link_libraries(mkterrain PUBLIC mkrhi)
+if(WIN32)
+    target_compile_definitions(mkterrain PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+if(MKRENDER_USER_CONFIG)
+    target_compile_definitions(mkterrain PUBLIC MKRENDER_USER_CONFIG="${MKRENDER_USER_CONFIG}")
+    target_include_directories(mkterrain PUBLIC ${MKRENDER_USER_CONFIG_INCLUDE_DIRS})
+endif()
+if(MSVC)
+    target_compile_options(mkterrain PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus)
+else()
+    target_compile_options(mkterrain PRIVATE -Wall -Wextra)
 endif()
 
 # --- mkrender ---
@@ -242,7 +265,7 @@ endif()
 if(MKRENDER_BUILD_TESTS)
     enable_testing()
     add_executable(mkrender_tests tests/RenderTests.cpp)
-    target_link_libraries(mkrender_tests PRIVATE mkrhi mkbake)
+    target_link_libraries(mkrender_tests PRIVATE mkrhi mkbake mkterrain)
     if(TARGET mkrender)
         target_link_libraries(mkrender_tests PRIVATE mkrender)
         target_compile_definitions(mkrender_tests PRIVATE MKRENDER_TESTS_RENDERER=1)

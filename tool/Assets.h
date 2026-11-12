@@ -2,6 +2,7 @@
 
 #include "mkrender/Bake.h"
 #include "mkrender/Renderer.h"
+#include "mkrender/Terrain.h"
 
 #include <map>
 #include <string>
@@ -28,13 +29,18 @@ struct SpriteEntry {
     std::string error;
 };
 
-// Scatter layer instances (assets/terrain/<scene>_<id>.scatter, "i x y z yaw scale" lines, world positions)
-struct ScatterItem {
-    Vec3 position;
-    f32 yaw = 0.0f, scale = 1.0f;
-};
+// Scatter layer instances (assets/terrain/<scene>_<id>.scatter, mkterrain's format, world positions)
+using ScatterItem = ScatterInstance;
 struct ScatterEntry {
-    std::vector<ScatterItem> items;
+    std::vector<ScatterInstance> items;
+    std::string error;
+    bool dirty = false; // painted, not saved yet
+};
+
+// Terrain of one object: its heightmap (shared by file, editable) and chunk meshes for its box (vertices relative to the box center)
+struct TerrainView {
+    const Heightmap* map = nullptr;
+    std::vector<MeshId> chunks;
     std::string error;
 };
 
@@ -58,8 +64,17 @@ public:
     void reload(const std::string& path);
     void reloadAll();
     MeshId box() const { return m_box; }
-    // Terrain mesh of one object (rebuilt when its heightmap or size changes). Vertices relative to the box center
-    MeshId terrain(u32 entityId, const std::string& heightmap, Vec3 size, std::string* error);
+    // Terrain chunks of one object (rebuilt when its heightmap, its size or the file changes; brushes rebuild the touched chunks)
+    const TerrainView& terrain(u32 entityId, const std::string& heightmap, Vec3 size);
+    // Editing: the loaded heightmap of a file (nullptr if it can't be read), a new one (unsaved), after a brush
+    Heightmap* heightmap(const std::string& path);
+    void createHeightmap(const std::string& path, Heightmap map);
+    void heightmapEdited(const std::string& path, const SampleRect& rect);
+    ScatterEntry& scatterEdit(const std::string& file); // marks it painted (dirty)
+    // Painted heightmaps (16-bit PNG) and scatter files: unsaved edits, save them (scene save does), drop them (reload from disk)
+    bool hasUnsavedEdits() const;
+    bool saveEdits(std::string& error);
+    void discardEdits();
 
     // Sprite quad of one cell of an image sheet (cached per image and cell layout)
     const SpriteEntry& sprite(const std::string& image, int columns, int rows, int cell, f32 pivotX, f32 pivotY, bool flipX, bool flipY);
@@ -87,13 +102,22 @@ private:
     struct TerrainEntry {
         std::string heightmap;
         Vec3 size;
-        MeshId mesh = kNoMesh;
-        std::string error;
+        u32 generation = ~0u;
+        TerrainView view;
     };
     Renderer* m_renderer = nullptr;
     std::string m_assetsDir;
     std::map<std::string, ModelEntry> m_models;
     std::map<u32, TerrainEntry> m_terrains;
+    struct HeightmapFile {
+        Heightmap map;
+        std::string error;
+        long long time = 0;
+        u32 generation = 0; // bumped when the whole map changes (load, new): objects rebuild every chunk
+        bool dirty = false;
+    };
+    std::map<std::string, HeightmapFile> m_heightmaps;
+    HeightmapFile& heightmapFile(const std::string& path);
     struct ImageEntry {
         u32 material = 0, width = 0, height = 0;
         std::string error;

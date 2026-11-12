@@ -191,7 +191,7 @@ std::string App::title() const {
     return name + " - MkRender";
 }
 
-bool App::dirty() const { return writeScene(m_scene) != m_savedText; }
+bool App::dirty() const { return writeScene(m_scene) != m_savedText || m_assets.hasUnsavedEdits(); }
 
 std::string App::projectSetting(const std::string& key) const {
     if (m_project.empty()) return {};
@@ -272,6 +272,9 @@ bool App::loadScenePath(const std::string& path) {
     }
     m_scene = std::move(scene);
     m_path = path;
+    m_assets.discardEdits(); // painted heightmaps/scatter of the scene left behind (the save prompt came first)
+    m_brushEdits.clear();
+    m_brushStroke = false;
     m_savedText = writeScene(m_scene);
     m_lastSnapshot = m_savedText;
     m_undo.clear();
@@ -303,6 +306,9 @@ bool App::loadScenePath(const std::string& path) {
 void App::newScene() {
     m_scene = Scene{};
     m_path.clear();
+    m_assets.discardEdits(); // painted heightmaps/scatter of the scene left behind (the save prompt came first)
+    m_brushEdits.clear();
+    m_brushStroke = false;
     m_savedText = writeScene(m_scene);
     m_lastSnapshot = m_savedText;
     m_undo.clear();
@@ -326,6 +332,7 @@ bool App::save() {
         log("Cannot save " + m_path + ": " + error);
         return false;
     }
+    if (!m_assets.saveEdits(error)) log("Cannot save painted files: " + error);
     m_savedText = writeScene(m_scene);
     m_fileTime = fileTime(m_path);
     m_externalChange = false;
@@ -448,6 +455,13 @@ void App::undo(bool redo) {
     auto& from = redo ? m_redo : m_undo;
     auto& to = redo ? m_undo : m_redo;
     if (from.empty()) return;
+    if (!from.back().empty() && from.back()[0] == '\x01') { // a brush stroke: swap the painted file's data
+        const size_t index = std::strtoul(from.back().c_str() + 1, nullptr, 10);
+        to.push_back(from.back());
+        from.pop_back();
+        if (index < m_brushEdits.size()) swapBrushEdit(m_brushEdits[index]);
+        return;
+    }
     to.push_back(m_lastSnapshot);
     m_lastSnapshot = from.back();
     from.pop_back();
@@ -865,6 +879,53 @@ void App::mouseRay(f32 mx, f32 my, Vec3& eye, Vec3& dir) const {
     eye = cameraEye();
 }
 
+f32 App::rayEntity(const Entity& e, Vec3 eye, Vec3 dir) {
+    const Transform w = worldTransform(m_scene, e);
+    if (e.is(kKindTerrain)) { // the heights, not the box
+    const TerrainView& t = m_assets.terrain(e.id, e.field("heightmap"), w.scale);
+    return t.map ? raycastTerrain(*t.map, w.position, w.scale, eye, dir, 1e5f) : -1.0f;
+    }
+    Vec3 lo, hi;
+    if (!entityBounds(e, lo, hi)) return -1.0f;
+    // Ray in the object's space (scale divided out), slab test against its box
+    const Quat inv{-w.rotation.x, -w.rotation.y, -w.rotation.z, w.rotation.w};
+    const auto toLocal = [&](Vec3 v) {
+        const Vec3 r = rotate(inv, v);
+        return Vec3{r.x / (w.scale.x != 0 ? w.scale.x : 1), r.y / (w.scale.y != 0 ? w.scale.y : 1), r.z / (w.scale.z != 0 ? w.scale.z : 1)};
+    };
+    const Vec3 o = toLocal(eye - w.position), d = toLocal(dir);
+    f32 t0 = 0.0f, t1 = 1e30f;
+    bool hit = true;
+    for (int a = 0; a < 3 && hit; ++a) {
+        const f32 oa = (&o.x)[a], da = (&d.x)[a], la = (&lo.x)[a], ha = (&hi.x)[a];
+        if (std::abs(da) < 1e-8f) {
+            hit = oa >= la && oa <= ha;
+            continue;
+        }
+        f32 ta = (la - oa) / da, tb = (ha - oa) / da;
+        if (ta > tb) std::swap(ta, tb);
+        t0 = std::max(t0, ta);
+        t1 = std::min(t1, tb);
+        hit = t0 <= t1;
+    }
+    if (!hit) return -1.0f;
+    if (isArea(e) && t0 <= 0.0f) return -1.0f; // inside a volume: pick what's in it instead
+    // t0 is in world units along dir (the local ray is the same ray, only rescaled per axis)
+    const Vec3 hitLocal = o + d * t0;
+    const Vec3 hitWorld = w.position + rotate(w.rotation, {hitLocal.x * w.scale.x, hitLocal.y * w.scale.y, hitLocal.z * w.scale.z});
+    return length(hitWorld - eye);
+}
+
+bool App::raySurface(Vec3 eye, Vec3 dir, u32 skipId, f32& distance) {
+    distance = 1e30f;
+    for (const Entity& e : m_scene.entities) {
+        if (e.id == skipId || m_hidden.count(e.id) || isMarker(e) || isArea(e) || e.is(kKindScatter) || e.is(kKindSprite)) continue;
+        const f32 d = rayEntity(e, eye, dir);
+        if (d >= 0.0f && d < distance) distance = d;
+    }
+    return distance < 1e29f;
+}
+
 bool App::groundPoint(f32 mx, f32 my, Vec3& out) {
     Vec3 eye, dir;
     mouseRay(mx, my, eye, dir);
@@ -913,35 +974,8 @@ u32 App::pick(f32 mx, f32 my, f32* hitDistance) {
             }
             continue;
         }
-        Vec3 lo, hi;
-        if (!entityBounds(e, lo, hi)) continue;
-        // Ray in the object's space (scale divided out), slab test against its box
-        const Quat inv{-w.rotation.x, -w.rotation.y, -w.rotation.z, w.rotation.w};
-        const auto toLocal = [&](Vec3 v) {
-            const Vec3 r = rotate(inv, v);
-            return Vec3{r.x / (w.scale.x != 0 ? w.scale.x : 1), r.y / (w.scale.y != 0 ? w.scale.y : 1), r.z / (w.scale.z != 0 ? w.scale.z : 1)};
-        };
-        const Vec3 o = toLocal(eye - w.position), d = toLocal(dir);
-        f32 t0 = 0.0f, t1 = 1e30f;
-        bool hit = true;
-        for (int a = 0; a < 3 && hit; ++a) {
-            const f32 oa = (&o.x)[a], da = (&d.x)[a], la = (&lo.x)[a], ha = (&hi.x)[a];
-            if (std::abs(da) < 1e-8f) {
-                hit = oa >= la && oa <= ha;
-                continue;
-            }
-            f32 ta = (la - oa) / da, tb = (ha - oa) / da;
-            if (ta > tb) std::swap(ta, tb);
-            t0 = std::max(t0, ta);
-            t1 = std::min(t1, tb);
-            hit = t0 <= t1;
-        }
-        if (!hit) continue;
-        if (isArea(e) && t0 <= 0.0f) continue; // inside a volume: pick what's in it instead
-        // t0 is in world units along dir (the local ray is the same ray, only rescaled per axis)
-        const Vec3 hitLocal = o + d * t0;
-        const Vec3 hitWorld = w.position + rotate(w.rotation, {hitLocal.x * w.scale.x, hitLocal.y * w.scale.y, hitLocal.z * w.scale.z});
-        const f32 dist = length(hitWorld - eye);
+        const f32 dist = rayEntity(e, eye, dir);
+        if (dist < 0.0f) continue;
         if (dist < bestT) bestT = dist, best = e.id;
     }
     if (hitDistance) *hitDistance = bestT;
@@ -993,6 +1027,192 @@ void App::reportProblem(const std::string& what) {
 }
 
 std::string App::sceneStem() const { return m_path.empty() ? std::string("untitled") : utf8Of(pathOf(m_path).stem()); }
+
+// ---------------------------------------------------------------- Brushes
+
+bool App::brushActive() const {
+    const Entity* e = m_scene.find(m_selected);
+    return m_brushOn && e && m_selection.size() <= 1 && (e->is(kKindTerrain) || e->is(kKindScatter));
+}
+
+void App::swapBrushEdit(BrushEdit& edit) {
+    if (edit.terrain) {
+        if (Heightmap* map = m_assets.heightmap(edit.path)) {
+            std::swap(*map, edit.map);
+            m_assets.createHeightmap(edit.path, *map); // same data, rebuilds every chunk
+        }
+    } else {
+        std::swap(m_assets.scatterEdit(edit.path).items, edit.items);
+    }
+}
+
+void App::drawBrushOutline(const Heightmap* map, Vec3 center, Vec3 size, u32 color) {
+    ImVec2 points[48];
+    int count = 0;
+    for (int i = 0; i < 48; ++i) {
+        const f32 a = static_cast<f32>(i) * (6.2831853f / 48.0f);
+        Vec3 p = m_brushPoint + Vec3{std::cos(a) * m_brushRadius, 0.0f, std::sin(a) * m_brushRadius};
+        f32 y = p.y;
+        if (map && terrainHeightAt(*map, center, size, p.x, p.z, &y)) p.y = y;
+        f32 x, sy;
+        if (project(p, x, sy)) points[count++] = {x, sy};
+    }
+    if (count > 2) ImGui::GetForegroundDrawList()->AddPolyline(points, count, color, ImDrawFlags_Closed, 2.0f);
+}
+
+bool App::brushInput(bool free) {
+    m_brushHit = false;
+    if (!brushActive()) {
+        m_brushStroke = false;
+        return false;
+    }
+    Entity& e = *m_scene.find(m_selected);
+    ImGuiIO& io = ImGui::GetIO();
+    Vec3 eye, dir;
+    mouseRay(io.MousePos.x, io.MousePos.y, eye, dir);
+    const Transform w = worldTransform(m_scene, e);
+    const bool terrain = e.is(kKindTerrain);
+    const std::string path = terrain ? e.field("heightmap") : e.field("file");
+    if (path.empty()) return false;
+    Heightmap* map = terrain ? m_assets.heightmap(path) : nullptr;
+    if (terrain && !map) return false;
+    if (free) {
+        f32 t = -1.0f;
+        if (terrain) t = raycastTerrain(*map, w.position, w.scale, eye, dir, 1e5f);
+        else if (!raySurface(eye, dir, e.id, t)) t = -1.0f;
+        if (t >= 0.0f) {
+            m_brushHit = true;
+            m_brushPoint = eye + dir * t;
+        }
+    }
+    if (m_brushStroke && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) { // stroke done: one undo step
+        m_brushStroke = false;
+        m_brushEdits.push_back(std::move(m_strokeBefore));
+        m_undo.push_back("\x01" + std::to_string(m_brushEdits.size() - 1));
+        while (m_undo.size() > 200) m_undo.pop_front();
+        m_redo.clear();
+    }
+    if (!m_brushStroke && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_brushHit && !io.KeyAlt) {
+        m_brushStroke = true;
+        m_strokeBefore = {};
+        m_strokeBefore.terrain = terrain;
+        m_strokeBefore.path = path;
+        if (terrain) {
+            m_strokeBefore.map = *map;
+            const f32 bottom = w.position.y - w.scale.y * 0.5f;
+            m_flattenTo = static_cast<u16>(std::lround(std::clamp((m_brushPoint.y - bottom) / std::max(w.scale.y, 0.001f), 0.0f, 1.0f) * 65535.0f));
+        } else {
+            m_strokeBefore.items = m_assets.scatter(path).items;
+        }
+    }
+    const f32 dt = std::min(io.DeltaTime, 0.1f);
+    if (m_brushStroke && m_brushHit) {
+        if (terrain) {
+            const auto brush = static_cast<TerrainBrush>(m_brush);
+            // Raise/Lower: strength 1 = a fifth of the box height per second at the center (the editor's numbers)
+            const f32 amount = (brush == TerrainBrush::Raise || brush == TerrainBrush::Lower ? 0.2f : 6.0f) * m_brushStrength * dt;
+            const SampleRect rect = applyBrush(*map, w.position, w.scale, brush, m_brushPoint, m_brushRadius, amount, m_flattenTo);
+            if (!rect.empty) m_assets.heightmapEdited(path, rect);
+        } else if (m_scatterErase != io.KeyShift) {
+            if (!m_assets.scatter(path).items.empty()) eraseScatter(m_assets.scatterEdit(path).items, m_brushPoint, m_brushRadius);
+        } else {
+            ScatterPaint p;
+            p.center = m_brushPoint;
+            p.radius = m_brushRadius;
+            parseFloat(e.field("density"), p.density);
+            parseFloat(e.field("minScale"), p.minScale);
+            parseFloat(e.field("maxScale"), p.maxScale);
+            p.randomYaw = e.field("randomYaw") != "false";
+            // Strength 1 fills about the whole circle in half a second
+            const f32 area = 3.14159265f * m_brushRadius * m_brushRadius * std::max(p.density, 0.0f);
+            const u32 maxAdd = static_cast<u32>(std::ceil(area * m_brushStrength * dt * 2.0f));
+            const auto random01 = [this] { // editor-only randomness
+                m_scatterSeed = m_scatterSeed * 6364136223846793005ull + 1442695040888963407ull;
+                return static_cast<f32>(m_scatterSeed >> 40) / 16777216.0f;
+            };
+            const f32 top = m_brushPoint.y + m_brushRadius + 50.0f;
+            const auto floorAt = [&](f32 x, f32 z, f32* y) {
+                f32 d = 0.0f;
+                if (!raySurface({x, top, z}, {0.0f, -1.0f, 0.0f}, e.id, d)) return false;
+                *y = top - d;
+                return true;
+            };
+            std::vector<ScatterInstance> items = m_assets.scatter(path).items;
+            if (paintScatter(items, p, maxAdd, floorAt, random01)) m_assets.scatterEdit(path).items = std::move(items);
+        }
+    }
+    if (m_brushHit) {
+        const u32 color = terrain ? IM_COL32(255, 220, 90, 220) : (m_scatterErase != io.KeyShift ? IM_COL32(255, 110, 90, 220) : IM_COL32(120, 230, 120, 220));
+        drawBrushOutline(map, w.position, w.scale, color);
+    }
+    return m_brushStroke || m_brushHit;
+}
+
+void App::drawBrushInspector(Entity& e) {
+    const bool terrain = e.is(kKindTerrain);
+    ImGui::SeparatorText(terrain ? "Terrain brush" : "Scatter brush");
+    const std::string key = terrain ? "heightmap" : "file";
+    std::string path = e.field(key);
+    if (path.empty()) {
+        if (m_project.empty()) {
+            ImGui::TextDisabled("Open a project to paint (files go to its assets/terrain).");
+            return;
+        }
+        const std::string made = "terrain/" + sceneStem() + "_" + std::to_string(e.id) + (terrain ? ".png" : ".scatter"); // scene::terrainFileFor
+        if (ImGui::Button(terrain ? "New flat heightmap" : "New instance file")) {
+            snapshot();
+            e.setField(key, made);
+            if (terrain) m_assets.createHeightmap(made, flatHeightmap(129, 16384)); // 128 cells, a quarter up so brushes can dig
+            else m_assets.scatterEdit(made);
+            m_brushOn = true;
+        }
+        ImGui::SetItemTooltip("%s (written when the scene is saved)", made.c_str());
+        return;
+    }
+    if (terrain) {
+        const Heightmap* map = m_assets.heightmap(path);
+        if (!map) {
+            ImGui::TextColored({1.0f, 0.6f, 0.2f, 1.0f}, "Cannot read %s", path.c_str());
+            return;
+        }
+        ImGui::TextDisabled("%u x %u samples, %.2f m cells", map->size, map->size, worldTransform(m_scene, e).scale.x / static_cast<f32>(map->size - 1));
+    } else {
+        ImGui::TextDisabled("%zu instances", m_assets.scatter(path).items.size());
+    }
+    ImGui::Checkbox("Brush (B)", &m_brushOn);
+    if (!terrain) {
+        ImGui::SameLine();
+        if (ImGui::Button("Clear") && !m_assets.scatter(path).items.empty()) {
+            m_strokeBefore = {};
+            m_strokeBefore.terrain = false;
+            m_strokeBefore.path = path;
+            m_strokeBefore.items = m_assets.scatter(path).items;
+            m_assets.scatterEdit(path).items.clear();
+            m_brushEdits.push_back(std::move(m_strokeBefore));
+            m_undo.push_back("\x01" + std::to_string(m_brushEdits.size() - 1));
+            m_redo.clear();
+        }
+    }
+    ImGui::BeginDisabled(!m_brushOn);
+    if (terrain) {
+        static const char* names[] = {"Raise", "Lower", "Flatten", "Smooth"};
+        for (int i = 0; i < 4; ++i) {
+            if (i) ImGui::SameLine();
+            if (ImGui::RadioButton(names[i], m_brush == i)) m_brush = i;
+        }
+    } else {
+        if (ImGui::RadioButton("Paint", !m_scatterErase)) m_scatterErase = false;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Erase", m_scatterErase)) m_scatterErase = true;
+    }
+    row("Radius (m)");
+    ImGui::SliderFloat("##bradius", &m_brushRadius, 0.5f, 64.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+    row("Strength");
+    ImGui::SliderFloat("##bstrength", &m_brushStrength, 0.01f, 1.0f, "%.2f");
+    ImGui::TextDisabled(terrain ? "Left drag paints; Flatten keeps the height under the stroke start; Ctrl+Z undoes a stroke"
+                                : "Left drag paints onto terrain and floors (Shift erases); density and sizes are fields below");
+    ImGui::EndDisabled();
+}
 
 // ---------------------------------------------------------------- Probes and grading
 
@@ -1238,14 +1458,10 @@ void App::addScene(DrawList& list) {
         inst.flags = e.flags & ~kInstanceHighlight;
         if (isSelected(e.id)) inst.flags |= kInstanceHighlight;
         if (e.is(kKindTerrain)) {
-            std::string error;
-            const MeshId mesh = m_assets.terrain(e.id, e.field("heightmap"), w.scale, &error);
-            if (!error.empty() && std::find(m_modelProblems.begin(), m_modelProblems.end(), error) == m_modelProblems.end()) {
-                m_modelProblems.push_back(error);
-                log("Terrain " + e.name + ": " + error);
-            }
+            const TerrainView& t = m_assets.terrain(e.id, e.field("heightmap"), w.scale);
+            if (!t.error.empty()) reportProblem("Terrain " + e.name + ": " + t.error);
             inst.position = w.position;
-            list.add(mesh, inst);
+            for (MeshId chunk : t.chunks) list.add(chunk, inst);
             continue;
         }
         MeshId mesh = m_assets.box();
@@ -1557,6 +1773,7 @@ void App::drawMenu() {
                     m_selected = 0;
                 }
             }
+            if (ImGui::IsKeyPressed(ImGuiKey_B)) m_brushOn = !m_brushOn; // terrain/scatter brush of the selected object
             if (ImGui::IsKeyPressed(ImGuiKey_G)) {
                 m_showGrid = !m_showGrid;
                 savePrefs();
@@ -1902,9 +2119,9 @@ void App::drawInspector() {
             bool checker = (e.flags & kInstanceChecker) != 0;
             row("Checker");
             if (ImGui::Checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
-            if (e.is(kKindScatter)) ImGui::TextDisabled("Draws the instances of its .scatter file (painting is in the MealKit editor for now).");
+            if (e.is(kKindScatter) || e.is(kKindTerrain)) drawBrushInspector(e);
             if (!e.field("anim").empty()) ImGui::TextDisabled("The anim clip isn't played in MkRender (bind pose).");
-            if (e.is(kKindTerrain)) ImGui::TextDisabled("The heightmap fills the object's box (scale). Brushes are in the MealKit editor.");
+            if (e.is(kKindTerrain)) ImGui::TextDisabled("The heightmap fills the object's box (scale).");
             if (e.is(kKindProbe)) {
                 ImGui::BeginDisabled(bakingProbes() || m_project.empty());
                 if (ImGui::Button("Bake this probe")) bakeProbes(e.id);
@@ -2160,7 +2377,7 @@ void App::drawOverlay() {
 void App::drawGizmo() {
     m_gizmoUsing = false;
     Entity* e = m_scene.find(m_selected);
-    if (!e || m_uiW < 2.0f || e->is(kKindScatter)) return;
+    if (!e || m_uiW < 2.0f || e->is(kKindScatter) || brushActive()) return;
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
     ImGuizmo::SetRect(m_uiX, m_uiY, m_uiW, m_uiH);
@@ -2210,7 +2427,8 @@ void App::viewportInput() {
     const ImVec2 mouse = io.MousePos;
     const bool inside = mouse.x >= m_uiX && mouse.y >= m_uiY && mouse.x < m_uiX + m_uiW && mouse.y < m_uiY + m_uiH;
     const bool free = inside && !io.WantCaptureMouse;
-    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing) {
+    const bool brushing = brushInput(free) || m_brushStroke;
+    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing && !brushing && !(io.KeyAlt && brushActive())) {
         m_clickCandidate = true;
         m_clickX = mouse.x;
         m_clickY = mouse.y;

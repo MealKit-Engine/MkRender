@@ -131,6 +131,15 @@ private:
     bool entityBounds(const Entity& e, Vec3& lo, Vec3& hi); // model-space box drawn for e
     bool isMarker(const Entity& e) const;
     bool isArea(const Entity& e) const;
+    f32 rayEntity(const Entity& e, Vec3 eye, Vec3 dir); // distance to e's surface (box, or terrain heights), -1 if missed
+    bool raySurface(Vec3 eye, Vec3 dir, u32 skipId, f32& distance); // nearest solid surface (not markers, areas, scatter, sprites)
+
+    // Brushes (a selected terrain or scatter layer with the brush on): terrain raise/lower/flatten/smooth into its 16-bit PNG,
+    // scatter paint/erase into its .scatter file; both saved with the scene, a stroke is one undo step
+    bool brushActive() const;
+    bool brushInput(bool free); // true: the mouse belongs to the brush this frame
+    void drawBrushInspector(Entity& e);
+    void drawBrushOutline(const Heightmap* map, Vec3 center, Vec3 size, u32 color);
 
     void* m_window = nullptr;
     Renderer* m_renderer = nullptr;
@@ -215,6 +224,24 @@ private:
     void finishProbeFace();
     void finishGradingCapture();
     std::vector<std::string> m_modelProblems; // model files that failed (logged once)
+
+    bool m_brushOn = false;
+    int m_brush = 0; // TerrainBrush
+    f32 m_brushRadius = 4.0f, m_brushStrength = 0.5f;
+    bool m_scatterErase = false;
+    bool m_brushStroke = false, m_brushHit = false;
+    Vec3 m_brushPoint;
+    u16 m_flattenTo = 0;
+    u64 m_scatterSeed = 0x9E3779B97F4A7C15ull;
+    struct BrushEdit { // the other state of a stroke (undo/redo swaps it with the current one)
+        bool terrain = true;
+        std::string path;
+        Heightmap map;
+        std::vector<ScatterInstance> items;
+    };
+    std::vector<BrushEdit> m_brushEdits; // undo entries "\x01<index>" point here
+    BrushEdit m_strokeBefore;
+    void swapBrushEdit(BrushEdit& edit);
 
     // Status
     std::deque<std::string> m_log;

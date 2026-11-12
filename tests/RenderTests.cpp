@@ -1,5 +1,6 @@
 // MkRender tests without an engine. GPU checks only report when there's no GPU (CI machines without one still pass).
 #include "mkrender/Bake.h"
+#include "mkrender/Terrain.h"
 #include "mkrhi/Rhi.h"
 #if MKRENDER_TESTS_RENDERER
 #include "mkrender/DrawList.h"
@@ -112,6 +113,39 @@ void testBake() {
     check(textureCacheName("x", 1, TextureUsage::Color) != textureCacheName("x", 1, TextureUsage::Normal), "texture cache names include the usage");
 }
 
+// mkterrain: heightmap PNG round trip, heights, ray hits, brushes, scatter text and painting
+void testTerrain() {
+    using namespace mkrender;
+    Heightmap map = flatHeightmap(65, 16384);
+    map.samples[10 * 65 + 20] = 60000;
+    const std::vector<u8> png = encodeHeightmap(map);
+    Heightmap back;
+    std::string error;
+    check(decodeHeightmap(png.data(), png.size(), back, error) && back.samples == map.samples, "heightmap PNG round trip");
+    map = flatHeightmap(65, 32768);
+    f32 y = 0.0f;
+    check(terrainHeightAt(map, {0, 0, 0}, {64, 10, 64}, 3.0f, -7.0f, &y) && std::abs(y - (32768.0f / 65535.0f * 10.0f - 5.0f)) < 1e-3f, "terrain height");
+    const f32 t = raycastTerrain(map, {0, 0, 0}, {64, 10, 64}, {0, 20, 0}, {0, -1, 0}, 100.0f);
+    check(std::abs(t - (20.0f - y)) < 0.01f, "terrain ray hit");
+    const SampleRect r = applyBrush(map, {0, 0, 0}, {64, 10, 64}, TerrainBrush::Raise, {0, 0, 0}, 4.0f, 0.1f, 0);
+    check(!r.empty && map.at(32, 32) > 32768 && map.at(0, 0) == 32768, "raise brush");
+    u32 cx0, cz0, cx1, cz1;
+    check(terrainChunks(map) == 2 && chunksOf(map, r, cx0, cz0, cx1, cz1) && cx0 == 0 && cx1 == 1, "touched chunks");
+    MeshData chunk;
+    buildTerrainChunk(map, {64, 10, 64}, 0, 0, 0, chunk);
+    check(chunk.vertices.size() > 33 * 33 && !chunk.indices.empty(), "chunk mesh");
+    std::vector<ScatterInstance> items;
+    u32 seed = 1;
+    const auto random01 = [&] { seed = seed * 1664525u + 1013904223u; return static_cast<f32>(seed >> 8) / 16777216.0f; };
+    ScatterPaint p;
+    p.radius = 5.0f;
+    p.density = 1.0f;
+    const u32 added = paintScatter(items, p, 40, [](f32, f32, f32* h) { *h = 1.0f; return true; }, random01);
+    std::vector<ScatterInstance> read;
+    check(added > 10 && readScatter(scatterText(items), read, error) && read.size() == items.size(), "scatter paint and text round trip");
+    check(eraseScatter(items, {0, 0, 0}, 100.0f) == added && items.empty(), "scatter erase");
+}
+
 #if MKRENDER_TESTS_RENDERER
 void testCulling() {
     using namespace mkrender;
@@ -143,6 +177,7 @@ int main() {
     testFormats();
     testGpu();
     testBake();
+    testTerrain();
 #if MKRENDER_TESTS_RENDERER
     testCulling();
 #endif

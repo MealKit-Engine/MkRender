@@ -51,6 +51,8 @@ private:
     void newScene();
     void reloadFromDisk();
     void checkExternalChange();
+    std::string kindsPath() const;
+    void reloadKinds(); // build/editor/kinds.txt of the project (MealKit-Contract "Object kinds"), else the built-in kinds
     bool dirty() const;
     void guarded(Pending action, const std::string& path = {}); // asks to save first when edited
     void runPending();
@@ -101,6 +103,8 @@ private:
     Scene m_scene;
     std::string m_savedText;
     std::filesystem::file_time_type m_fileTime{};
+    std::filesystem::file_time_type m_kindsTime{};
+    bool m_kindsLoaded = false;
     f64 m_fileCheck = 0.0;
     bool m_externalChange = false;
     std::vector<std::string> m_warnings;

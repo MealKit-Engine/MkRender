@@ -84,7 +84,7 @@ A host that already has a `Vec3`/`Quat`/`Mat4`, a vertex and material struct or 
 - **Environment**: sun direction and color, sky / ground / fog, sky HDRI file values, post-processing (tone mapping, exposure, bloom, vignette, grain, chromatic aberration, LUT file)
 - Undo/redo (Ctrl+Z / Ctrl+Y), save (Ctrl+S), save as, new scene, project scene list; a file changed by the MealKit editor reloads by itself when nothing is edited here, or asks
 
-The file is written the way the engine's scene module writes it (same keys, order, shortest float text, `field` lines), so a scene the engine saved comes back byte for byte, and older formats are upgraded like the engine does. Game kinds' fields are kept as text, so nothing is lost without the game's code. Terrain draws its heightmap; scatter layers and sprites show as icons and HDRIs/LUTs aren't applied yet (their values are still edited and saved).
+The file is written the way the engine's scene module writes it (same keys, order, shortest float text, `field` lines), so a scene the engine saved comes back byte for byte, and older formats are upgraded like the engine does. Game kinds' fields are kept as text, so nothing is lost without the game's code. When the project has `build/editor/kinds.txt` (written by the MealKit editor when it loads the game code, or `<game>_headless --write-kinds`; MealKit-Contract "Object kinds"), MkRender uses it for kind names, the [Add] menu, field labels, typed widgets and defaults, and rereads it when it changes. Terrain draws its heightmap; scatter layers and sprites show as icons and HDRIs/LUTs aren't applied yet (their values are still edited and saved).
 
 ```
 MkRender [--project <folder>] [--file <.scene|.gltf|.glb>] [--select <id>] [--lighting pbr|toon|unlit]

@@ -96,16 +96,34 @@ std::string floatsText(const f32* v, int count);
 bool parseColorText(const std::string& text, u8 rgba[4]);
 std::string colorText(const u8 rgba[4]);
 
-// Built-in kinds (the engine's scene::builtinTypes): label and whether the game draws it
-struct KindInfo {
-    const char* name;
-    const char* label;
-    bool marker; // a point in space (spawn, light, camera): drawn as an icon here
-    bool area;   // a box volume (probe, reverb zone): drawn as lines here
+// One field of a kind from the object kinds file (MealKit-Contract "Object kinds")
+struct KindField {
+    std::string path;    // scene field key ("a.b", "a[2]")
+    std::string type;    // bool int uint float enum vec3 quat string seconds color row id text
+    std::string value;   // default text
+    std::string label;   // display name without hints
+    std::string hint;    // "gizmo=radius" parts after '|'
+    std::vector<std::string> enumNames;
+    bool view = false, readOnly = false;
 };
-const std::vector<KindInfo>& builtinKinds();
+
+// Object kinds: the built-in ones (the engine's scene::builtinTypes), replaced by the project's build/editor/kinds.txt when it exists
+struct KindInfo {
+    std::string name;
+    std::string label;
+    bool marker = false;   // a point in space (spawn, light, camera): drawn as an icon here
+    bool area = false;     // a box volume (probe, reverb zone): drawn as lines here
+    bool cosmetic = false; // no effect on game results
+    bool game = false;     // declared by the game (MEALKIT_OBJECT)
+    std::vector<KindField> fields; // empty without the kinds file
+};
+const std::vector<KindInfo>& kinds();
 const KindInfo* findKind(const std::string& name);
-// Default field lines of a new object of a built-in kind (empty for kinds without fields)
+const KindField* findKindField(const std::string& kind, const std::string& path);
+// Reads an "object-kinds 1" file and uses its kinds (false: kinds unchanged). resetKinds goes back to the built-in list
+bool loadKinds(const std::string& path, std::string& error);
+void resetKinds();
+// Default field lines of a new object of the kind (from the kinds file, else the built-in defaults; empty for kinds without fields)
 TextFields defaultFields(const std::string& kind);
 
 } // namespace mkrender::tool

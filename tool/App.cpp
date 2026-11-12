@@ -6,6 +6,7 @@
 #include <ImGuizmo.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -207,6 +208,7 @@ bool App::openProject(const std::string& dir) {
     }
     m_project = utf8Of(std::filesystem::absolute(pathOf(dir), ec).lexically_normal());
     m_assets.setAssetsDir(utf8Of(pathOf(m_project) / "assets"));
+    reloadKinds();
     const std::string model = projectSetting("lightingModel");
     setLightingModel(model == "Toon" ? LightingModel::Toon : model == "Unlit" ? LightingModel::Unlit : LightingModel::Pbr);
     log("Project " + m_project);
@@ -227,6 +229,7 @@ bool App::openFile(const std::string& path) {
             if (utf8Of(p) != m_project) {
                 m_project = utf8Of(p);
                 m_assets.setAssetsDir(utf8Of(p / "assets"));
+                reloadKinds();
                 const std::string model = projectSetting("lightingModel");
                 setLightingModel(model == "Toon" ? LightingModel::Toon : model == "Unlit" ? LightingModel::Unlit : LightingModel::Pbr);
             }
@@ -334,6 +337,24 @@ void App::reloadFromDisk() {
         m_distance = distance;
         if (m_scene.find(keep)) m_selected = keep;
     }
+}
+
+std::string App::kindsPath() const { return m_project.empty() ? std::string() : utf8Of(pathOf(m_project) / "build" / "editor" / "kinds.txt"); }
+
+void App::reloadKinds() {
+    const std::string path = kindsPath();
+    m_kindsTime = path.empty() ? std::filesystem::file_time_type{} : fileTime(path);
+    std::string error;
+    if (m_kindsTime != std::filesystem::file_time_type{} && loadKinds(path, error)) {
+        m_kindsLoaded = true;
+        size_t game = 0;
+        for (const KindInfo& k : kinds()) game += k.game ? 1 : 0;
+        log("Object kinds: " + std::to_string(kinds().size()) + " (" + std::to_string(game) + " from the game) from " + path);
+        return;
+    }
+    if (!error.empty()) log("Object kinds: " + error);
+    resetKinds();
+    m_kindsLoaded = false;
 }
 
 void App::checkExternalChange() {
@@ -510,7 +531,8 @@ bool App::isMarker(const Entity& e) const {
 
 bool App::isArea(const Entity& e) const {
     const KindInfo* k = findKind(e.kind);
-    if (!k) return e.model.empty(); // a game kind without a model: often a trigger volume, so lines (the game decides what it draws)
+    if (!k || (k->game && !m_kindsLoaded)) return e.model.empty(); // a game kind without a model: often a trigger volume, so lines
+    if (k->game && !k->marker && !k->area) return e.model.empty();
     return k->area;
 }
 
@@ -676,6 +698,7 @@ void App::frame(f64 dt) {
     m_fps = m_fps <= 0.0f ? 60.0f : m_fps * 0.95f + 0.05f / static_cast<f32>(std::max(dt, 1e-4));
     ImGuizmo::BeginFrame();
     checkExternalChange();
+    if (!m_project.empty() && fileTime(kindsPath()) != m_kindsTime) reloadKinds();
 
     const ImGuiID dockspace = ImGui::GetID("MkRenderDock");
     if (!m_layoutDone) {
@@ -854,8 +877,19 @@ void App::drawSaveDialog() {
 }
 
 void App::drawAddMenu() {
-    for (const KindInfo& k : builtinKinds())
-        if (ImGui::MenuItem(k.label)) addEntity(k.name);
+    bool anyGame = false;
+    for (const KindInfo& k : kinds()) {
+        if (k.game) {
+            anyGame = true;
+            continue;
+        }
+        if (ImGui::MenuItem(k.label.c_str())) addEntity(k.name);
+    }
+    if (!anyGame) return;
+    ImGui::Separator();
+    ImGui::TextDisabled("Game");
+    for (const KindInfo& k : kinds())
+        if (k.game && ImGui::MenuItem(k.label.c_str())) addEntity(k.name);
 }
 
 // ---------------------------------------------------------------- Hierarchy
@@ -975,7 +1009,9 @@ void App::drawFields(Entity& e) {
     for (size_t i = 0; i < e.fields.size(); ++i) {
         auto& [key, value] = e.fields[i];
         ImGui::PushID(static_cast<int>(i));
-        row(key.c_str());
+        const KindField* kf = findKindField(e.kind, key);
+        row(kf && !kf->label.empty() ? kf->label.c_str() : key.c_str());
+        if (kf) ImGui::SetItemTooltip("%s (%s)%s", key.c_str(), kf->type.c_str(), kf->view ? ", view only" : "");
         ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() - ImGui::GetStyle().ItemSpacing.x);
         f32 number = 0.0f;
         u8 color[4];
@@ -986,7 +1022,39 @@ void App::drawFields(Entity& e) {
                 ImGui::EndCombo();
             }
         };
-        if (e.is(kKindCamera) && key == "body") enumCombo(bodies, 7);
+        std::vector<const char*> enumNames;
+        if (kf)
+            for (const std::string& n : kf->enumNames) enumNames.push_back(n.c_str());
+        f32 v3[3];
+        if (kf && kf->readOnly) {
+            ImGui::TextDisabled("%s", value.c_str());
+        } else if (kf && kf->type == "enum" && !enumNames.empty()) {
+            enumCombo(enumNames.data(), static_cast<int>(enumNames.size()));
+        } else if (kf && kf->type == "bool") {
+            bool on = value == "true";
+            if (ImGui::Checkbox("##v", &on)) value = on ? "true" : "false";
+        } else if (kf && kf->type == "color") {
+            if (!parseColorText(value, color)) color[0] = color[1] = color[2] = color[3] = 255;
+            f32 c[4] = {color[0] / 255.0f, color[1] / 255.0f, color[2] / 255.0f, color[3] / 255.0f};
+            if (ImGui::ColorEdit4("##v", c, ImGuiColorEditFlags_AlphaPreviewHalf)) {
+                for (int k = 0; k < 4; ++k) color[k] = static_cast<u8>(std::lround(std::clamp(c[k], 0.0f, 1.0f) * 255.0f));
+                value = colorText(color);
+            }
+        } else if (kf && (kf->type == "int" || kf->type == "uint")) {
+            parseFloat(value, number);
+            int n = static_cast<int>(number);
+            if (ImGui::DragInt("##v", &n, 0.1f, kf->type == "uint" ? 0 : INT_MIN, INT_MAX)) value = std::to_string(n);
+        } else if (kf && (kf->type == "float" || kf->type == "seconds")) {
+            parseFloat(value, number);
+            if (ImGui::DragFloat("##v", &number, std::max(0.01f, std::abs(number) * 0.01f), kf->type == "seconds" ? 0.0f : 0.0f, 0.0f,
+                                 kf->type == "seconds" ? "%.3f s" : "%.3f"))
+                value = floatText(kf->type == "seconds" ? std::max(0.0f, number) : number);
+        } else if (kf && kf->type == "vec3" &&
+                   std::sscanf(value.c_str(), "%f %f %f", &v3[0], &v3[1], &v3[2]) == 3) {
+            if (ImGui::DragFloat3("##v", v3, 0.05f)) value = floatsText(v3, 3);
+        } else if (kf && (kf->type == "string" || kf->type == "row" || kf->type == "text")) {
+            inputString("##v", value);
+        } else if (e.is(kKindCamera) && key == "body") enumCombo(bodies, 7);
         else if (e.is(kKindCamera) && key == "ease") enumCombo(eases, 3);
         else if (value == "true" || value == "false") {
             bool on = value == "true";
@@ -1011,6 +1079,13 @@ void App::drawFields(Entity& e) {
         ImGui::PopID();
     }
     if (remove >= 0) e.fields.erase(e.fields.begin() + remove);
+    if (const KindInfo* k = findKind(e.kind)) {
+        size_t missing = 0;
+        for (const KindField& f : k->fields) missing += e.field(f.path).empty() && std::none_of(e.fields.begin(), e.fields.end(), [&](const auto& l) { return l.first == f.path; });
+        if (missing && ImGui::Button(("Add " + std::to_string(missing) + " missing fields with defaults").c_str()))
+            for (const KindField& f : k->fields)
+                if (std::none_of(e.fields.begin(), e.fields.end(), [&](const auto& l) { return l.first == f.path; })) e.fields.push_back({f.path, f.value});
+    }
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Add field").x - ImGui::GetStyle().FramePadding.x * 4);
     ImGui::InputTextWithHint("##newfield", "field name", m_newField, sizeof(m_newField));
     ImGui::SameLine();
@@ -1033,8 +1108,8 @@ void App::drawInspector() {
             inputString("##name", e.name);
             row("Kind");
             if (ImGui::BeginCombo("##kind", e.kind.c_str())) {
-                for (const KindInfo& k : builtinKinds())
-                    if (ImGui::Selectable(k.label, e.kind == k.name) && e.kind != k.name) {
+                for (const KindInfo& k : kinds())
+                    if (ImGui::Selectable(k.label.c_str(), e.kind == k.name) && e.kind != k.name) {
                         e.kind = k.name;
                         for (const auto& [key, value] : defaultFields(k.name))
                             if (e.field(key).empty()) e.setField(key, value);
@@ -1050,7 +1125,8 @@ void App::drawInspector() {
                 ImGui::EndCombo();
             }
             if (!findKind(e.kind))
-                ImGui::TextDisabled("Game kind: fields are kept as text (the game's code isn't loaded here); without a model it's drawn as lines.");
+                ImGui::TextDisabled(m_kindsLoaded ? "Unknown kind: not in the project's object kinds; fields are kept as text."
+                                                  : "Game kind: fields are kept as text (no build/editor/kinds.txt yet: open the project in the editor once, or run <game>_headless --write-kinds).");
             if (e.parent) {
                 const Entity* parent = m_scene.find(e.parent);
                 row("Parent");
@@ -1218,7 +1294,8 @@ void App::drawOverlay() {
         const Transform w = worldTransform(m_scene, e);
         const bool selected = e.id == m_selected;
         if (isArea(e)) {
-            const bool game = findKind(e.kind) == nullptr;
+            const KindInfo* kindInfo = findKind(e.kind);
+            const bool game = !kindInfo || kindInfo->game;
             if (m_showMarkers || selected)
                 boxLines(w, {-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f},
                          selected ? selectedColor : game ? IM_COL32(255, 150, 220, 150) : IM_COL32(120, 200, 255, 160), selected ? 2.0f : 1.0f);

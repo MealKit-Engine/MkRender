@@ -15,7 +15,7 @@
 #   MKRENDER_USER_CONFIG       header with the host's own math/mesh/image types (include/mkrender/Config.h), and
 #   MKRENDER_USER_CONFIG_INCLUDE_DIRS  the folders it needs
 cmake_minimum_required(VERSION 3.25)
-project(mkrender VERSION 0.4.0 LANGUAGES C CXX)
+project(mkrender VERSION 0.4.1 LANGUAGES C CXX)
 
 set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
 set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)

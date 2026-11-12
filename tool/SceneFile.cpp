@@ -402,24 +402,148 @@ bool saveScene(const std::string& path, const Scene& scene, std::string& error) 
     return true;
 }
 
-const std::vector<KindInfo>& builtinKinds() {
-    static const std::vector<KindInfo> kinds = {
-        {kKindSolid, "Solid box", false, false},         {kKindDecoration, "Decoration (no collision)", false, false},
-        {kKindSpawn, "Spawn point", true, false},        {kKindProbe, "Reflection probe", false, true},
-        {kKindPointLight, "Point light", true, false},   {kKindReverb, "Reverb zone", false, true},
-        {kKindCamera, "Virtual camera", true, false},    {kKindTerrain, "Terrain", false, false},
-        {kKindScatter, "Scatter layer", false, false},   {kKindSprite, "Sprite", false, false},
+namespace {
+
+std::vector<KindInfo> builtinKindList() {
+    const auto k = [](const char* name, const char* label, bool marker, bool area, bool cosmetic) {
+        KindInfo info;
+        info.name = name;
+        info.label = label;
+        info.marker = marker;
+        info.area = area;
+        info.cosmetic = cosmetic;
+        return info;
     };
-    return kinds;
+    return {k(kKindSolid, "Solid box", false, false, false),       k(kKindDecoration, "Decoration (no collision)", false, false, true),
+            k(kKindSpawn, "Spawn point", true, false, false),      k(kKindProbe, "Reflection probe", false, true, true),
+            k(kKindPointLight, "Point light", true, false, true),  k(kKindReverb, "Reverb zone", false, true, true),
+            k(kKindCamera, "Virtual camera", true, false, true),   k(kKindTerrain, "Terrain", false, false, false),
+            k(kKindScatter, "Scatter layer", false, false, true),  k(kKindSprite, "Sprite", false, false, true)};
 }
 
+std::vector<KindInfo>& kindList() {
+    static std::vector<KindInfo> list = builtinKindList();
+    return list;
+}
+
+TextFields builtinDefaults(const std::string& kind);
+
+std::string trimmed(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t");
+    if (b == std::string::npos) return {};
+    return s.substr(b, s.find_last_not_of(" \t") - b + 1);
+}
+
+} // namespace
+
+const std::vector<KindInfo>& kinds() { return kindList(); }
+
+void resetKinds() { kindList() = builtinKindList(); }
+
 const KindInfo* findKind(const std::string& name) {
-    for (const KindInfo& k : builtinKinds())
+    for (const KindInfo& k : kindList())
         if (name == k.name) return &k;
     return nullptr;
 }
 
+const KindField* findKindField(const std::string& kind, const std::string& path) {
+    const KindInfo* k = findKind(kind);
+    if (!k) return nullptr;
+    for (const KindField& f : k->fields)
+        if (f.path == path) return &f;
+    return nullptr;
+}
+
+bool loadKinds(const std::string& path, std::string& error) {
+    std::ifstream in(pathOf(path), std::ios::binary);
+    if (!in) {
+        error = "cannot open " + path;
+        return false;
+    }
+    std::vector<KindInfo> list;
+    std::string line;
+    bool formatOk = false;
+    while (std::getline(in, line)) {
+        if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF) line.erase(0, 3); // BOM
+        line = trimmed(line);
+        if (line.empty() || line[0] == '#') continue;
+        const size_t sp = line.find_first_of(" \t");
+        const std::string key = line.substr(0, sp);
+        std::string value = sp == std::string::npos ? std::string() : trimmed(line.substr(sp));
+        if (key == "@format") {
+            formatOk = value.rfind("object-kinds", 0) == 0;
+            continue;
+        }
+        if (key == "kind") {
+            list.emplace_back().name = value;
+            list.back().label = value;
+            continue;
+        }
+        if (list.empty()) continue;
+        KindInfo& k = list.back();
+        KindField* f = k.fields.empty() ? nullptr : &k.fields.back();
+        if (key == "field") {
+            KindField& nf = k.fields.emplace_back();
+            nf.path = value;
+            nf.label = value;
+            nf.type = "text";
+        } else if (key == "label") {
+            const size_t bar = value.find('|');
+            const std::string hint = bar == std::string::npos ? std::string() : value.substr(bar + 1);
+            if (bar != std::string::npos) value.resize(bar);
+            if (f) {
+                f->label = value;
+                f->hint = hint;
+            } else {
+                k.label = value;
+            }
+        } else if (key == "game" && !f) {
+            k.game = true;
+        } else if (key == "flags") {
+            std::istringstream words(value);
+            for (std::string w; words >> w;) {
+                if (f) {
+                    f->view |= w == "view";
+                    f->readOnly |= w == "readonly";
+                } else {
+                    k.marker |= w == "marker";
+                    k.area |= w == "area";
+                    k.cosmetic |= w == "cosmetic";
+                }
+            }
+        } else if (f && key == "type") {
+            f->type = value;
+        } else if (f && key == "default") {
+            f->value = value;
+        } else if (f && key == "enum") {
+            std::istringstream words(value);
+            for (std::string w; words >> w;) f->enumNames.push_back(w);
+        }
+    }
+    if (!formatOk) {
+        error = path + ": not an object-kinds file";
+        return false;
+    }
+    if (list.empty()) {
+        error = path + ": no kinds";
+        return false;
+    }
+    kindList() = std::move(list);
+    return true;
+}
+
 TextFields defaultFields(const std::string& kind) {
+    if (const KindInfo* k = findKind(kind); k && !k->fields.empty()) {
+        TextFields out;
+        for (const KindField& f : k->fields) out.push_back({f.path, f.value});
+        return out;
+    }
+    return builtinDefaults(kind);
+}
+
+namespace {
+
+TextFields builtinDefaults(const std::string& kind) {
     if (kind == kKindPointLight) return {{"color", "#FFD6A0"}, {"intensity", "3"}, {"range", "6"}};
     if (kind == kKindReverb) return {{"roomSize", "0.6"}, {"damping", "0.5"}, {"wet", "0.35"}, {"width", "1"}, {"fade", "0.8"}};
     if (kind == kKindTerrain) return {{"heightmap", ""}};
@@ -437,5 +561,7 @@ TextFields defaultFields(const std::string& kind) {
                 {"ease", "EaseInOut"},   {"rail", ""},           {"moveSpeed", "10"}};
     return {};
 }
+
+} // namespace
 
 } // namespace mkrender::tool

@@ -21,6 +21,13 @@
 #include <sstream>
 #include <string>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <dwmapi.h>
+#endif
+
 namespace {
 
 mkrender::tool::App* g_app = nullptr;
@@ -32,20 +39,131 @@ void logLine(mkrhi::LogLevel level, const char* message, void*) {
     else SDL_Log("%s", line.c_str());
 }
 
-void loadFont(float size) {
+// Segoe UI + Malgun Gothic (Korean names in scenes) + the icon font (engine docs/TOOL_DESIGN.md section 2), all at one size.
+// Returns whether the icon font loaded: without it icon buttons show their names (App::iconButton)
+bool loadFont(float size) {
     ImGuiIO& io = ImGui::GetIO();
     const char* path = "C:\\Windows\\Fonts\\segoeui.ttf";
-    if (SDL_GetPathInfo(path, nullptr) && io.Fonts->AddFontFromFileTTF(path, size)) {
-        // Korean names in scenes: Malgun Gothic merged in
-        ImFontConfig merge;
-        merge.MergeMode = true;
-        const char* korean = "C:\\Windows\\Fonts\\malgun.ttf";
-        if (SDL_GetPathInfo(korean, nullptr)) io.Fonts->AddFontFromFileTTF(korean, size, &merge);
-        return;
+    if (!SDL_GetPathInfo(path, nullptr) || !io.Fonts->AddFontFromFileTTF(path, size)) {
+        ImFontConfig config;
+        config.SizePixels = size;
+        io.Fonts->AddFontDefaultVector(&config);
     }
-    ImFontConfig config;
-    config.SizePixels = size;
-    io.Fonts->AddFontDefaultVector(&config);
+    ImFontConfig merge;
+    merge.MergeMode = true;
+    const char* korean = "C:\\Windows\\Fonts\\malgun.ttf";
+    if (SDL_GetPathInfo(korean, nullptr)) io.Fonts->AddFontFromFileTTF(korean, size, &merge);
+    // Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on 10: the editor's code points
+    for (const char* icons : {"C:\\Windows\\Fonts\\SegoeIcons.ttf", "C:\\Windows\\Fonts\\segmdl2.ttf"}) {
+        ImFontConfig config;
+        config.MergeMode = true;
+        config.GlyphOffset = ImVec2(0.0f, 3.0f);
+        if (SDL_GetPathInfo(icons, nullptr) && io.Fonts->AddFontFromFileTTF(icons, size, &config)) return true;
+    }
+    return false;
+}
+
+// The MealKit editor's look (module-debug src/mealkit/debug/ImGuiLayer.cpp applyStyle), copied since MkRender doesn't link the engine
+// (engine docs/TOOL_DESIGN.md section 3). Keep it the same as the original.
+void applyEditorStyle(float scale) {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& s = ImGui::GetStyle();
+    // Panels are separated by space and a darker gutter, not by lines
+    s.WindowRounding = 6.0f;
+    s.ChildRounding = 4.0f;
+    s.PopupRounding = 6.0f;
+    s.FrameRounding = 4.0f;
+    s.GrabRounding = 3.0f;
+    s.TabRounding = 4.0f;
+    s.ScrollbarRounding = 6.0f;
+    s.ScrollbarSize = 10.0f;
+    s.WindowBorderSize = 1.0f;
+    s.ChildBorderSize = 1.0f;
+    s.PopupBorderSize = 1.0f;
+    s.TabBarBorderSize = 0.0f;
+    s.TabBarOverlineSize = 0.0f;
+    s.DockingSeparatorSize = 4.0f;
+    s.DockingNodeHasCloseButton = false; // each tab has its own close button
+    s.TabCloseButtonMinWidthSelected = 0.0f; // tabs show it only while hovered
+    s.TabCloseButtonMinWidthUnselected = 0.0f;
+    s.WindowPadding = ImVec2(10.0f, 10.0f);
+    s.FramePadding = ImVec2(7.0f, 4.0f);
+    s.ItemSpacing = ImVec2(8.0f, 6.0f);
+    s.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+    s.CellPadding = ImVec2(6.0f, 3.0f);
+    s.IndentSpacing = 16.0f;
+    s.WindowMenuButtonPosition = ImGuiDir_None; // no triangle on every dock tab bar: tabs are all visible and can be dragged
+    const ImVec4 clear(0.0f, 0.0f, 0.0f, 0.0f);
+    const ImVec4 gutter(0.075f, 0.078f, 0.086f, 1.00f); // behind the panels: menu bar, status bar, gaps, tab strips
+    const ImVec4 panel(0.118f, 0.122f, 0.133f, 1.00f);
+    const auto white = [](float alpha) { return ImVec4(1.0f, 1.0f, 1.0f, alpha); };
+    const auto accent = [](float alpha) { return ImVec4(0.36f, 0.56f, 0.86f, alpha); }; // only for selection and active states
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_Text] = ImVec4(0.88f, 0.89f, 0.91f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.50f, 0.52f, 0.56f, 1.00f);
+    c[ImGuiCol_TextSelectedBg] = accent(0.35f);
+    c[ImGuiCol_WindowBg] = panel;
+    c[ImGuiCol_ChildBg] = clear;
+    c[ImGuiCol_PopupBg] = ImVec4(0.135f, 0.14f, 0.153f, 0.99f);
+    c[ImGuiCol_Border] = white(0.06f);
+    c[ImGuiCol_BorderShadow] = clear;
+    c[ImGuiCol_MenuBarBg] = gutter;
+    c[ImGuiCol_TitleBg] = gutter;
+    c[ImGuiCol_TitleBgActive] = gutter;
+    c[ImGuiCol_TitleBgCollapsed] = gutter;
+    c[ImGuiCol_FrameBg] = ImVec4(0.165f, 0.17f, 0.185f, 1.00f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.207f, 0.225f, 1.00f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.235f, 0.243f, 0.265f, 1.00f);
+    c[ImGuiCol_Header] = ImVec4(0.20f, 0.31f, 0.47f, 1.00f);
+    c[ImGuiCol_HeaderHovered] = white(0.06f);
+    c[ImGuiCol_HeaderActive] = accent(0.55f);
+    c[ImGuiCol_Button] = ImVec4(0.165f, 0.17f, 0.185f, 1.00f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.235f, 0.243f, 0.265f, 1.00f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.29f, 0.30f, 0.325f, 1.00f);
+    c[ImGuiCol_CheckMark] = ImVec4(0.62f, 0.76f, 0.98f, 1.00f);
+    c[ImGuiCol_SliderGrab] = ImVec4(0.42f, 0.44f, 0.48f, 1.00f);
+    c[ImGuiCol_SliderGrabActive] = accent(1.0f);
+    c[ImGuiCol_Separator] = white(0.07f);
+    c[ImGuiCol_SeparatorHovered] = accent(0.55f);
+    c[ImGuiCol_SeparatorActive] = accent(0.90f);
+    c[ImGuiCol_ResizeGrip] = clear;
+    c[ImGuiCol_ResizeGripHovered] = accent(0.40f);
+    c[ImGuiCol_ResizeGripActive] = accent(0.80f);
+    c[ImGuiCol_ScrollbarBg] = clear;
+    c[ImGuiCol_ScrollbarGrab] = white(0.13f);
+    c[ImGuiCol_ScrollbarGrabHovered] = white(0.22f);
+    c[ImGuiCol_ScrollbarGrabActive] = white(0.30f);
+    // The selected tab joins its panel; the others sit on the strip
+    c[ImGuiCol_Tab] = clear;
+    c[ImGuiCol_TabHovered] = white(0.07f);
+    c[ImGuiCol_TabSelected] = panel;
+    c[ImGuiCol_TabSelectedOverline] = clear;
+    c[ImGuiCol_TabDimmed] = clear;
+    c[ImGuiCol_TabDimmedSelected] = panel;
+    c[ImGuiCol_TabDimmedSelectedOverline] = clear;
+    c[ImGuiCol_TableHeaderBg] = white(0.04f);
+    c[ImGuiCol_TableBorderStrong] = white(0.07f);
+    c[ImGuiCol_TableBorderLight] = white(0.05f);
+    c[ImGuiCol_TableRowBgAlt] = white(0.02f);
+    c[ImGuiCol_DockingPreview] = accent(0.50f);
+    c[ImGuiCol_DockingEmptyBg] = clear;
+    c[ImGuiCol_NavCursor] = accent(0.90f);
+    s.ScaleAllSizes(scale);
+    s.FontScaleDpi = scale;
+}
+
+// Dark title bar in the gutter color (#131416, editor kEditorCaptionColor). Ignored where Windows doesn't support it
+void applyEditorCaption(SDL_Window* window) {
+#if defined(_WIN32)
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if (!hwnd) return;
+    const BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    const COLORREF caption = RGB(0x13, 0x14, 0x16);
+    DwmSetWindowAttribute(hwnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof(caption));
+#else
+    (void)window;
+#endif
 }
 
 // --check-terrain <file.png|file.scatter>: decode + encode with mkterrain, "TERRAIN same" when the bytes come back unchanged
@@ -237,6 +355,7 @@ int main(int argc, char** argv) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MkRender", why.c_str(), window);
         return 1;
     }
+    applyEditorCaption(window);
     SDL_ShowWindow(window);
 
     IMGUI_CHECKVERSION();
@@ -248,17 +367,14 @@ int main(int argc, char** argv) {
         ini = prefDir + "imgui.ini";
         io.IniFilename = ini.c_str();
     }
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.ScaleAllSizes(scale);
-    style.FontScaleDpi = scale;
-    style.FrameRounding = 3.0f;
-    loadFont(16.0f);
+    applyEditorStyle(scale);
+    const bool iconFont = loadFont(16.0f);
     ImGui_ImplSDL3_InitForOther(window);
     mkrhi::imguiInit(renderer.device());
 
     mkrender::tool::App app;
     g_app = &app;
+    app.iconFont = iconFont;
     app.init(window, renderer);
     app.log(std::string("MkRender ") + MKRENDER_VERSION + ", " + mkrhi::backendName() + ", " + renderer.adapterName());
     if (!project.empty() && file.empty()) app.openProject(project);

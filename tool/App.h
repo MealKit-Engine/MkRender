@@ -63,8 +63,11 @@ public:
     // no UI, no selection, view time 0 (animation clips at their offset, wind still)
     void setShot(Vec3 eye, f32 yawDegrees, f32 pitchDegrees);
     bool shotMode() const { return m_shot; } // --window <name>: brings that docked window to the front (captures for docs and checks) // --editor-play: play once an editor is found
+    bool iconFont = false; // the Segoe icon font merged into the UI font (main.cpp loadFont)
 
 private:
+    // Flat square icon button with its name in the tooltip (engine docs/TOOL_DESIGN.md section 1); the name as the label without the icon font
+    bool iconButton(const char* glyph, const char* name, const char* detail = nullptr);
     enum class Pending { None, Quit, OpenPath, NewScene };
     enum class Gizmo { Translate, Rotate, Scale };
 

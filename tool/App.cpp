@@ -25,6 +25,13 @@ constexpr f32 kDeg = kPi / 180.0f;
 constexpr u32 kThumbSize = 96; // asset thumbnails (pixels)
 constexpr const char* kDragEntity = "MKR_ENTITY";
 constexpr const char* kDragAsset = "MKR_ASSET";
+// Glyphs from engine docs/TOOL_DESIGN.md section 2 (Segoe Fluent Icons / MDL2 Assets)
+constexpr const char* kIconAdd = "\xEE\x9C\x90";     // U+E710
+constexpr const char* kIconRemove = "\xEE\x9C\xB8";  // U+E738 remove from a list
+constexpr const char* kIconRefresh = "\xEE\x9C\xAC"; // U+E72C
+constexpr const char* kIconPlay = "\xEE\x9D\xA8";    // U+E768
+constexpr const char* kIconCamera = "\xEE\x9C\xA2";  // U+E722 capture
+constexpr const char* kIconClear = "\xEE\xA2\x94";   // U+E894
 
 Quat conjugate(Quat q) { return {-q.x, -q.y, -q.z, q.w}; }
 
@@ -1174,7 +1181,7 @@ void App::drawBrushInspector(Entity& e) {
             return;
         }
         const std::string made = "terrain/" + sceneStem() + "_" + std::to_string(e.id) + (terrain ? ".png" : ".scatter"); // scene::terrainFileFor
-        if (ImGui::Button(terrain ? "New flat heightmap" : "New instance file")) {
+        if (iconButton(kIconAdd, terrain ? "New flat heightmap" : "New instance file")) {
             snapshot();
             e.setField(key, made);
             if (terrain) m_assets.createHeightmap(made, flatHeightmap(129, 16384)); // 128 cells, a quarter up so brushes can dig
@@ -1197,7 +1204,7 @@ void App::drawBrushInspector(Entity& e) {
     ImGui::Checkbox("Brush (B)", &m_brushOn);
     if (!terrain) {
         ImGui::SameLine();
-        if (ImGui::Button("Clear") && !m_assets.scatter(path).items.empty()) {
+        if (iconButton(kIconClear, "Clear instances") && !m_assets.scatter(path).items.empty()) {
             m_strokeBefore = {};
             m_strokeBefore.terrain = false;
             m_strokeBefore.path = path;
@@ -1338,7 +1345,7 @@ void App::drawLinkMenu() {
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
     ImGui::InputTextWithHint("##cutscene", "cutscene name", m_cutsceneName, sizeof(m_cutsceneName));
     ImGui::SameLine();
-    if (ImGui::Button("Preview") && m_cutsceneName[0] && m_linkFound) linkLook(0, m_cutsceneName);
+    if (iconButton(kIconPlay, "Preview cutscene") && m_cutsceneName[0] && m_linkFound) linkLook(0, m_cutsceneName);
     if (ImGui::MenuItem("End preview", nullptr, false, m_linkFound && m_linkMode != "play")) linkStop();
     ImGui::TextDisabled("The editor plays and previews the saved scene file; MkRender saves first.");
     ImGui::EndMenu();
@@ -2136,9 +2143,25 @@ void App::drawTreeNode(const Entity& e) {
     ImGui::PopID();
 }
 
+bool App::iconButton(const char* glyph, const char* name, const char* detail) {
+    const std::string label = std::string(iconFont ? glyph : name) + "##" + name;
+    // Flat like the editor's icon buttons: clear until hovered
+    if (iconFont) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+    }
+    const bool pressed = iconFont ? ImGui::Button(label.c_str(), {ImGui::GetFrameHeight(), 0}) : ImGui::Button(label.c_str());
+    if (iconFont) ImGui::PopStyleColor(2);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (detail) ImGui::SetTooltip("%s\n%s", name, detail);
+        else if (iconFont) ImGui::SetTooltip("%s", name);
+    }
+    return pressed;
+}
+
 void App::drawHierarchy() {
     if (ImGui::Begin("Hierarchy")) {
-        if (ImGui::Button("+ Add")) ImGui::OpenPopup("add");
+        if (iconButton(kIconAdd, "Add object")) ImGui::OpenPopup("add");
         if (ImGui::BeginPopup("add")) {
             drawAddMenu();
             ImGui::EndPopup();
@@ -2273,8 +2296,7 @@ void App::drawFields(Entity& e) {
             inputString("##v", value);
         }
         ImGui::SameLine();
-        if (ImGui::Button("x", {ImGui::GetFrameHeight(), 0})) remove = static_cast<int>(i);
-        ImGui::SetItemTooltip("Remove this field line");
+        if (iconButton(kIconRemove, "Remove this field line")) remove = static_cast<int>(i);
         ImGui::PopID();
     }
     if (remove >= 0) e.fields.erase(e.fields.begin() + remove);
@@ -2501,7 +2523,7 @@ void App::drawEnvironment() {
         row("Color LUT");
         if (filePicker("##lut", lut, ".cube", "lut/")) env.setPost("lut", lut);
         ImGui::BeginDisabled(m_project.empty());
-        if (ImGui::Button("Grading capture")) requestGradingCapture();
+        if (iconButton(kIconCamera, "Grading capture", "The view without LUT to art/grading, to grade in an image editor")) requestGradingCapture();
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Saves the view without the LUT to art/grading/<scene>.png with a neutral.cube beside it:\n"
                               "grade both in Resolve or Photoshop, export a .cube into assets/lut and pick it here.");
@@ -2862,7 +2884,7 @@ void App::drawAssets() {
         if (m_assets.assetsDir().empty()) {
             ImGui::TextDisabled("Open a project to see its assets.");
         } else {
-            if (ImGui::Button("Rescan")) m_assets.rescan();
+            if (iconButton(kIconRefresh, "Rescan")) m_assets.rescan();
             ImGui::SameLine();
             if (ImGui::Checkbox("Pictures", &m_showThumbs)) savePrefs();
             ImGui::SameLine();

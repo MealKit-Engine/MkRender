@@ -8,7 +8,7 @@ set(imguizmo ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imguizmo/ImGuizmo.cpp)
 set(MKCONTRACT_BUILD_TESTS OFF)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/mkcontract ${CMAKE_CURRENT_BINARY_DIR}/mkcontract)
 
-add_executable(MkRender WIN32 main.cpp App.h App.cpp Assets.h Assets.cpp Model.h Model.cpp SceneFile.h SceneFile.cpp ${imguizmo})
+add_executable(MkRender WIN32 main.cpp App.h App.cpp Assets.h Assets.cpp Model.h Model.cpp Anim.h Anim.cpp Process.cpp SceneFile.h SceneFile.cpp ${imguizmo})
 target_include_directories(MkRender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imguizmo)
 target_link_libraries(MkRender PRIVATE mkrender mkbake mkterrain mkcontract_client mkrender_imgui SDL3::SDL3-static)
 target_include_directories(MkRender SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cgltf ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb)

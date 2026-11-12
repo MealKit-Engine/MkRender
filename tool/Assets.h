@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Anim.h"
 #include "mkrender/Bake.h"
 #include "mkrender/Renderer.h"
 #include "mkrender/Terrain.h"
@@ -20,6 +21,9 @@ struct ModelEntry {
     std::string error;
     std::vector<std::string> warnings;
     u32 triangles = 0, materials = 0, textures = 0;
+    Skeleton skeleton; // skinned model: drawn with a pose of one of its clips
+    std::vector<AnimationClip> clips;
+    bool skinned() const { return skeleton.valid(); }
 };
 
 // One sprite image cell as a 1 x 1 m quad on x/y facing -z (pivot at the origin), alpha-tested texture

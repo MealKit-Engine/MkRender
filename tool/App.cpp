@@ -22,6 +22,7 @@ namespace {
 
 constexpr f32 kPi = 3.14159265358979f;
 constexpr f32 kDeg = kPi / 180.0f;
+constexpr u32 kThumbSize = 96; // asset thumbnails (pixels)
 constexpr const char* kDragEntity = "MKR_ENTITY";
 constexpr const char* kDragAsset = "MKR_ASSET";
 
@@ -736,6 +737,7 @@ void App::loadPrefs() {
         else if (key == "alwaysSnap") m_alwaysSnap = value == "true";
         else if (key == "markers") m_showMarkers = value != "false";
         else if (key == "compressTextures") m_assets.setCompressTextures(value != "false");
+        else if (key == "thumbnails") m_showThumbs = value != "false";
         else if (number && key == "gridStep") m_gridStep = std::max(v, 0.01f);
         else if (number && key == "snapMove") m_snapMove = std::max(v, 0.001f);
         else if (number && key == "snapRotate") m_snapRotate = std::max(v, 0.1f);
@@ -752,7 +754,7 @@ void App::savePrefs() const {
     out << "grid " << (m_showGrid ? "true" : "false") << "\ngridStep " << floatText(m_gridStep) << "\nalwaysSnap " << (m_alwaysSnap ? "true" : "false")
         << "\nmarkers " << (m_showMarkers ? "true" : "false") << "\nsnapMove " << floatText(m_snapMove) << "\nsnapRotate " << floatText(m_snapRotate)
         << "\nsnapScale " << floatText(m_snapScale) << "\nautosaveMinutes " << floatText(m_autosaveMinutes)
-        << "\ncompressTextures " << (m_assets.compressTextures() ? "true" : "false") << "\n";
+        << "\ncompressTextures " << (m_assets.compressTextures() ? "true" : "false") << "\nthumbnails " << (m_showThumbs ? "true" : "false") << "\n";
     for (const std::string& r : m_recent) out << "recent " << r << "\n";
 }
 
@@ -1232,15 +1234,20 @@ std::string jsonValue(const std::string& json, const char* key) { // flat JSON: 
 }
 } // namespace
 
+bool processAlive(u32 pid); // Process.cpp
+
 void App::pollLink() {
     if (m_project.empty() || m_time < m_linkPollAt) return;
     m_linkPollAt = m_time + 1.0;
     const bool was = m_linkFound;
     m_linkFound = false;
     for (const mkcontract::live::Instance& in : mkcontract::live::findInstances(m_project)) {
-        if (in.kind != "editor") continue;
+        if (in.kind != "editor" || m_linkDead.count(in.pid) || !processAlive(in.pid)) continue; // a crashed editor's file stays behind
         const mkcontract::live::HttpResult r = mkcontract::live::request(in, "GET", "scene/state");
-        if (r.status != 200) continue; // gone, or an editor without the scene service
+        if (r.status != 200) { // gone, or an editor without the scene service: not asked again
+            m_linkDead.insert(in.pid);
+            continue;
+        }
         m_editor = in;
         m_linkFound = true;
         m_linkMode = jsonValue(r.body, "mode");
@@ -1409,6 +1416,15 @@ void App::finishGradingCapture() {
 
 void App::renderOffscreen() {
     Renderer& r = *m_renderer;
+    if (!m_thumbNext.empty()) {
+        Thumb& t = m_thumbs[m_thumbNext];
+        if (!t.target) t.target = r.createRenderTarget(kThumbSize, kThumbSize);
+        if (t.target) {
+            r.drawToTarget(t.target, m_thumbFrame, m_thumbList, m_thumbLighting);
+            t.drawn = true;
+        }
+        m_thumbNext.clear();
+    }
     if (!m_probeQueue.empty() && m_bakeListReady) {
         const Entity* e = m_scene.find(m_probeQueue.front());
         if (!e) {
@@ -1479,6 +1495,7 @@ void App::fill(DrawList& list) {
         m_probeList.push_back({w.position, Vec3{std::fabs(w.scale.x), std::fabs(w.scale.y), std::fabs(w.scale.z)} * 0.5f, g.id});
     }
     addScene(list);
+    if (m_showThumbs) prepareThumbnail();
     // Probe faces and the grading capture draw the scene without selection highlight
     m_bakeListReady = false;
     const bool grade = m_gradeRequested && m_time > 0.25; // after the first frames, when the dock layout gives the view its size
@@ -1492,6 +1509,97 @@ void App::fill(DrawList& list) {
         m_bakeList.clear();
         fillScene(m_bakeList, false);
         m_bakeListReady = true;
+    }
+}
+
+// ---------------------------------------------------------------- Thumbnails
+
+namespace {
+constexpr size_t kThumbLimit = 512; // targets aren't deleted: a cap for very big projects
+long long thumbFileTime(const std::string& path) {
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(std::filesystem::path(std::u8string(path.begin(), path.end())), ec);
+    return ec ? -1 : static_cast<long long>(t.time_since_epoch().count());
+}
+} // namespace
+
+u64 App::thumbnail(const std::string& path) {
+    auto it = m_thumbs.find(path);
+    if (it == m_thumbs.end()) {
+        if (m_thumbs.size() < kThumbLimit) m_thumbs.emplace(path, Thumb{});
+        return 0;
+    }
+    Thumb& t = it->second;
+    if (m_time - t.checked >= 1.0) { // redrawn after the file changes
+        t.checked = m_time;
+        const long long time = thumbFileTime(m_assets.resolve(path));
+        if (time != t.fileTime) {
+            t.fileTime = time;
+            t.drawn = false;
+        }
+    }
+    if (!t.target || !t.drawn) return 0;
+    const mkrhi::Texture texture = m_renderer->renderTargetTexture(t.target);
+    return texture ? mkrhi::imguiTextureId(m_renderer->device(), texture) : 0;
+}
+
+// The editor's AssetThumbnails look: grey studio light, the model standing at the origin seen from the front-right
+void App::prepareThumbnail() {
+    m_thumbNext.clear();
+    for (auto& [path, t] : m_thumbs) {
+        if (t.drawn) continue;
+        m_thumbList.clear();
+        FrameParams& frame = m_thumbFrame;
+        frame = FrameParams{};
+        frame.viewport = {0.0f, 0.0f, static_cast<f32>(kThumbSize), static_cast<f32>(kThumbSize)};
+        frame.sunDirection = {0.45f, 0.75f, -0.5f};
+        frame.sunColor = {1.0f, 1.0f, 1.0f};
+        frame.skyColor = {0.32f, 0.32f, 0.34f};
+        frame.groundColor = {0.16f, 0.16f, 0.16f};
+        frame.fogColor = {0.16f, 0.17f, 0.19f};
+        frame.fogDensity = 0.0f;
+        constexpr f32 kFovY = 30.0f * kDeg;
+        const bool image = path.size() > 4 && lower(path.substr(path.size() - 4)) == ".png";
+        if (image) { // a 1 m quad seen straight on
+            const SpriteEntry& s = m_assets.sprite(path, 1, 1, 0, 0.5f, 0.5f, false, false);
+            if (s.mesh != kNoMesh) {
+                const f32 aspect = s.cellHeight ? static_cast<f32>(s.cellWidth) / static_cast<f32>(s.cellHeight) : 1.0f;
+                InstanceData inst;
+                inst.scale = aspect >= 1.0f ? Vec3{1.0f, 1.0f / aspect, 1.0f} : Vec3{aspect, 1.0f, 1.0f};
+                m_thumbList.add(s.mesh, inst);
+            }
+            const f32 distance = 0.5f / std::tan(kFovY * 0.5f) * 1.08f;
+            const Vec3 eye{0.0f, 0.0f, -distance};
+            frame.viewProj = lookAtLH(eye, {0, 0, 0}, {0, 1, 0}) * perspectiveReversedZ(kFovY, 1.0f, 0.05f, distance * 4.0f);
+            frame.cameraPos = eye;
+            frame.cameraForward = {0, 0, 1};
+            m_thumbLighting = LightingModel::Unlit;
+        } else {
+            const ModelEntry& m = m_assets.model(path);
+            const Vec3 lo = m.ok ? m.boundsMin : Vec3{-0.5f, 0.0f, -0.5f}, hi = m.ok ? m.boundsMax : Vec3{0.5f, 1.0f, 0.5f};
+            const Vec3 size = hi - lo;
+            const f32 radius = std::max(0.5f * length(size), 0.05f);
+            const Vec3 center{0.0f, 0.5f * size.y, 0.0f};
+            const f32 distance = radius / std::sin(kFovY * 0.5f) * 1.1f;
+            const Vec3 eye = center + normalize(Vec3{0.6f, 0.45f, -1.0f}) * distance;
+            frame.viewProj = lookAtLH(eye, center, {0, 1, 0}) * perspectiveReversedZ(kFovY, 1.0f, distance * 0.02f, distance * 4.0f);
+            frame.cameraPos = eye;
+            frame.cameraForward = normalize(center - eye);
+            if (m.ok) {
+                InstanceData inst;
+                inst.position = {-(lo.x + hi.x) * 0.5f, -lo.y, -(lo.z + hi.z) * 0.5f};
+                if (m.skinned()) {
+                    restPose(m.skeleton, m_pose);
+                    skinPalette(m.skeleton, m_pose, m_palette);
+                    m_thumbList.addSkinned(m.mesh, inst, m_palette.data(), static_cast<u32>(m_palette.size()));
+                } else {
+                    m_thumbList.add(m.mesh, inst);
+                }
+            }
+            m_thumbLighting = LightingModel::Pbr;
+        }
+        m_thumbNext = path;
+        return; // one per frame
     }
 }
 
@@ -1578,6 +1686,23 @@ void App::addScene(DrawList& list) {
         MeshId mesh = m_assets.box();
         if (!e.model.empty()) {
             const ModelEntry& m = m_assets.model(e.model);
+            if (m.ok && m.skinned()) { // the "anim" field: "<clip> [offset seconds]", looping (render::addModel); no clip = rest pose
+                const std::string anim = e.field("anim");
+                const size_t space = anim.find(' ');
+                const AnimationClip* clip = anim.empty() ? nullptr : findClip(m.clips, anim.substr(0, space));
+                if (clip) {
+                    const f64 offset = space == std::string::npos ? 0.0 : std::atof(anim.c_str() + space + 1);
+                    samplePose(m.skeleton, *clip, static_cast<f32>(std::fmod((m_playAnims ? m_time : 0.0) + offset, 4096.0)), true, m_pose);
+                } else {
+                    restPose(m.skeleton, m_pose);
+                }
+                skinPalette(m.skeleton, m_pose, m_palette);
+                inst.position = w.position;
+                inst.rotation = w.rotation;
+                inst.scale = w.scale;
+                list.addSkinned(m.mesh, inst, m_palette.data(), static_cast<u32>(m_palette.size()));
+                continue;
+            }
             if (m.ok) mesh = m.mesh;
             else if (std::find(m_modelProblems.begin(), m_modelProblems.end(), e.model) == m_modelProblems.end()) {
                 m_modelProblems.push_back(e.model);
@@ -1631,6 +1756,10 @@ void App::frame(f64 dt) {
     }
     drawHierarchy();
     drawAssets();
+    if (!focusWindow.empty() && m_time > 0.1) {
+        ImGui::SetWindowFocus(focusWindow.c_str());
+        focusWindow.clear();
+    }
     drawInspector();
     drawEnvironment();
     drawStats();
@@ -1832,6 +1961,8 @@ void App::drawMenu() {
             }
             ImGui::SetItemTooltip("Uses the engine's texture cache (build/cache/textures) and fills it when missing. Off: plain RGBA8");
             ImGui::Separator();
+            ImGui::MenuItem("Play animations", nullptr, &m_playAnims);
+            ImGui::SetItemTooltip("Skinned models loop the clip of their anim field (off: the clip's first frame plus its offset)");
             if (ImGui::MenuItem("Reset layout")) layoutDocks(ImGui::GetID("MkRenderDock"));
             ImGui::EndMenu();
         }
@@ -2237,7 +2368,22 @@ void App::drawInspector() {
             row("Checker");
             if (ImGui::Checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
             if (e.is(kKindScatter) || e.is(kKindTerrain)) drawBrushInspector(e);
-            if (!e.field("anim").empty()) ImGui::TextDisabled("The anim clip isn't played in MkRender (bind pose).");
+            if (!e.model.empty()) {
+                const ModelEntry& m = m_assets.model(e.model);
+                if (m.ok && m.skinned()) {
+                    std::string anim = e.field("anim");
+                    const std::string clipName = anim.substr(0, anim.find(' '));
+                    row("Clip");
+                    if (ImGui::BeginCombo("##clip", clipName.empty() ? "(rest pose)" : clipName.c_str())) {
+                        if (ImGui::Selectable("(rest pose)", clipName.empty())) e.setField("anim", "");
+                        for (const AnimationClip& c : m.clips)
+                            if (ImGui::Selectable(c.name.c_str(), c.name == clipName))
+                                e.setField("anim", c.name + (anim.find(' ') != std::string::npos ? anim.substr(anim.find(' ')) : std::string()));
+                        ImGui::EndCombo();
+                    }
+                    ImGui::SetItemTooltip("The anim field (\"<clip> [offset seconds]\"), played in a loop like in the game view");
+                }
+            }
             if (e.is(kKindTerrain)) ImGui::TextDisabled("The heightmap fills the object's box (scale).");
             if (e.is(kKindProbe)) {
                 ImGui::BeginDisabled(bakingProbes() || m_project.empty());
@@ -2705,6 +2851,8 @@ void App::drawAssets() {
         } else {
             if (ImGui::Button("Rescan")) m_assets.rescan();
             ImGui::SameLine();
+            if (ImGui::Checkbox("Pictures", &m_showThumbs)) savePrefs();
+            ImGui::SameLine();
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputTextWithHint("##assetfilter", "Search assets", m_assetFilter, sizeof(m_assetFilter));
             const std::string filter = lower(m_assetFilter);
@@ -2719,11 +2867,28 @@ void App::drawAssets() {
                         files = std::string(ext) == ".glb" ? m_assets.modelFiles() : m_assets.files(ext);
                     }
                     ImGui::TextDisabled("%s", hint);
+                    const bool grid = m_showThumbs && (std::string(ext) == ".glb" || std::string(ext) == ".png");
+                    const f32 cell = ImGui::GetFontSize() * 5.0f, textHeight = ImGui::GetTextLineHeight();
                     if (ImGui::BeginChild("files")) {
                         for (const std::string& f : files) {
                             if (!filter.empty() && lower(f).find(filter) == std::string::npos) continue;
                             ImGui::PushID(f.c_str());
-                            ImGui::Selectable(f.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
+                            if (grid) { // picture, then the file name cut to the cell
+                                const ImVec2 at = ImGui::GetCursorScreenPos();
+                                ImGui::Selectable("##cell", false, ImGuiSelectableFlags_AllowDoubleClick, {cell, cell + textHeight});
+                                ImDrawList* draw = ImGui::GetWindowDrawList();
+                                if (const u64 picture = thumbnail(f))
+                                    draw->AddImage(ImTextureRef(static_cast<ImTextureID>(picture)), at, {at.x + cell, at.y + cell});
+                                else
+                                    draw->AddRectFilled(at, {at.x + cell, at.y + cell}, ImGui::GetColorU32(ImGuiCol_FrameBg));
+                                const std::string name = utf8Of(pathOf(f).filename());
+                                draw->PushClipRect({at.x, at.y + cell}, {at.x + cell, at.y + cell + textHeight}, true);
+                                draw->AddText({at.x, at.y + cell}, ImGui::GetColorU32(ImGuiCol_Text), name.c_str());
+                                draw->PopClipRect();
+                                ImGui::SetItemTooltip("%s", f.c_str());
+                            } else {
+                                ImGui::Selectable(f.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
+                            }
                             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) placeAsset(f, m_pivot);
                             if (ImGui::BeginDragDropSource()) {
                                 ImGui::SetDragDropPayload(kDragAsset, f.data(), f.size());
@@ -2737,6 +2902,8 @@ void App::drawAssets() {
                                 ImGui::EndPopup();
                             }
                             ImGui::PopID();
+                            if (grid && ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + cell < ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x)
+                                ImGui::SameLine();
                         }
                     }
                     ImGui::EndChild();

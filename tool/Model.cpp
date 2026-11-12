@@ -72,11 +72,166 @@ u32 encodeColor(const f32 linear[4]) {
     return channel(linear[0], true) | (channel(linear[1], true) << 8) | (channel(linear[2], true) << 16) | (channel(linear[3], false) << 24);
 }
 
+// Skin reading state: joint index remap for one skin (the first) (glTF skin.joints index → Skeleton index)
+struct SkinState {
+    const cgltf_skin* skin = nullptr;
+    std::vector<u8> remap;              // skin.joints index → Skeleton index
+    std::vector<const cgltf_node*> nodes; // Skeleton index → node
+    i32 jointOf(const cgltf_node* n) const { // the closest joint among the node or its ancestors (0 if none: root)
+        for (; n; n = n->parent)
+            for (size_t i = 0; i < nodes.size(); ++i)
+                if (nodes[i] == n) return static_cast<i32>(i);
+        return 0;
+    }
+};
+
+u32 packWeights(const f32 w[4]) {
+    f32 sum = w[0] + w[1] + w[2] + w[3];
+    if (sum <= 0.0f) return 0xFFu;
+    u32 q[4], total = 0;
+    for (int i = 0; i < 4; ++i) total += q[i] = static_cast<u32>(std::lround(std::clamp(w[i] / sum, 0.0f, 1.0f) * 255.0f));
+    // Make the sum 255 (adjusting the largest weight)
+    int big = 0;
+    for (int i = 1; i < 4; ++i) if (q[i] > q[big]) big = i;
+    q[big] = static_cast<u32>(static_cast<i32>(q[big]) + 255 - static_cast<i32>(total));
+    return q[0] | (q[1] << 8) | (q[2] << 16) | (q[3] << 24);
+}
+
+Quat nlerpQuat(Quat a, Quat b, f32 t) {
+    const f32 d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    const f32 s = d < 0.0f ? -1.0f : 1.0f;
+    Quat q{a.x + (b.x * s - a.x) * t, a.y + (b.y * s - a.y) * t, a.z + (b.z * s - a.z) * t, a.w + (b.w * s - a.w) * t};
+    const f32 len = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return len > 0.0f ? Quat{q.x / len, q.y / len, q.z / len, q.w / len} : Quat{};
+}
+
+// glTF column-major matrix → row vector convention Mat4 (memory as is: column i becomes row i)
+Mat4 fromGltf(const f32 m[16]) {
+    Mat4 r;
+    std::memcpy(&r.m[0][0], m, sizeof(f32) * 16);
+    return r;
+}
+
+// First skin → Skeleton (reordered so parents come first). false if there are too many joints
+bool readSkeleton(const cgltf_skin& skin, SkinState& state, Skeleton& out, std::string& why) {
+    const size_t count = skin.joints_count;
+    if (count == 0) return false;
+    if (count > kMaxJoints) {
+        why = std::to_string(count) + " joints (max " + std::to_string(kMaxJoints) + ")";
+        return false;
+    }
+    const auto skinIndex = [&](const cgltf_node* n) -> i32 {
+        for (size_t i = 0; i < count; ++i)
+            if (skin.joints[i] == n) return static_cast<i32>(i);
+        return -1;
+    };
+    std::vector<i32> parent(count, -1), depth(count, 0); // by skin index
+    for (size_t i = 0; i < count; ++i)
+        for (const cgltf_node* n = skin.joints[i]->parent; n; n = n->parent) {
+            const i32 p = skinIndex(n);
+            if (p >= 0 && parent[i] < 0) parent[i] = p;
+            if (p >= 0) ++depth[i];
+        }
+    std::vector<size_t> order(count);
+    for (size_t i = 0; i < count; ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return depth[a] < depth[b]; });
+    state.skin = &skin;
+    state.remap.assign(count, 0);
+    state.nodes.resize(count);
+    for (size_t k = 0; k < count; ++k) {
+        state.remap[order[k]] = static_cast<u8>(k);
+        state.nodes[k] = skin.joints[order[k]];
+    }
+    out.joints.resize(count);
+    for (size_t k = 0; k < count; ++k) {
+        const size_t i = order[k];
+        const cgltf_node* n = skin.joints[i];
+        Skeleton::Joint& j = out.joints[k];
+        j.name = n->name ? n->name : "joint" + std::to_string(k);
+        j.parent = parent[i] >= 0 ? static_cast<i32>(state.remap[static_cast<size_t>(parent[i])]) : -1;
+        if (n->has_translation) j.rest.translation = {n->translation[0], n->translation[1], n->translation[2]};
+        if (n->has_rotation) j.rest.rotation = {n->rotation[0], n->rotation[1], n->rotation[2], n->rotation[3]};
+        if (n->has_scale) j.rest.scale = {n->scale[0], n->scale[1], n->scale[2]};
+        f32 ib[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        if (skin.inverse_bind_matrices) cgltf_accessor_read_float(skin.inverse_bind_matrices, i, ib, 16);
+        j.inverseBind = fromGltf(ib);
+    }
+    const cgltf_node* top = state.nodes[0]->parent; // node above the root joint (Blender armature object)
+    if (top) {
+        f32 m[16];
+        cgltf_node_transform_world(top, m);
+        out.root = fromGltf(m);
+    }
+    return true;
+}
+
+// glTF animation → clip baked at 30 Hz. Channels that move non-joint nodes and morph weights are dropped.
+// Interpolation: linear (rotations nlerp), step, and cubic spline as linear between key values (tangents unused)
+AnimationClip bakeClip(const cgltf_animation& anim, const SkinState& state, const Skeleton& skeleton, size_t index) {
+    AnimationClip clip;
+    clip.name = anim.name && *anim.name ? anim.name : "clip" + std::to_string(index);
+    f32 duration = 0.0f;
+    for (cgltf_size c = 0; c < anim.channels_count; ++c) {
+        const cgltf_accessor* input = anim.channels[c].sampler->input;
+        if (input->count) {
+            f32 last = 0.0f;
+            cgltf_accessor_read_float(input, input->count - 1, &last, 1);
+            duration = std::max(duration, last);
+        }
+    }
+    const u32 joints = static_cast<u32>(skeleton.joints.size());
+    clip.frames = static_cast<u32>(std::ceil(duration * static_cast<f32>(kClipFrameRate) - 1e-3f)) + 1;
+    clip.duration = static_cast<f32>(clip.frames - 1) / static_cast<f32>(kClipFrameRate);
+    clip.poses.resize(static_cast<size_t>(clip.frames) * joints);
+    for (u32 f = 0; f < clip.frames; ++f)
+        for (u32 j = 0; j < joints; ++j) clip.poses[static_cast<size_t>(f) * joints + j] = skeleton.joints[j].rest;
+    for (cgltf_size c = 0; c < anim.channels_count; ++c) {
+        const cgltf_animation_channel& ch = anim.channels[c];
+        i32 joint = -1;
+        for (size_t k = 0; k < state.nodes.size(); ++k)
+            if (state.nodes[k] == ch.target_node) joint = static_cast<i32>(k);
+        const cgltf_animation_path_type path = ch.target_path;
+        if (joint < 0 || path == cgltf_animation_path_type_weights || path == cgltf_animation_path_type_invalid) continue;
+        const cgltf_animation_sampler& s = *ch.sampler;
+        const size_t keys = s.input->count;
+        if (keys == 0) continue;
+        const int comps = path == cgltf_animation_path_type_rotation ? 4 : 3;
+        const bool cubic = s.interpolation == cgltf_interpolation_type_cubic_spline;
+        std::vector<f32> times(keys), values(keys * comps);
+        for (size_t k = 0; k < keys; ++k) {
+            cgltf_accessor_read_float(s.input, k, &times[k], 1);
+            cgltf_accessor_read_float(s.output, cubic ? k * 3 + 1 : k, &values[k * comps], comps);
+        }
+        for (u32 f = 0; f < clip.frames; ++f) {
+            const f32 t = static_cast<f32>(f) / static_cast<f32>(kClipFrameRate);
+            size_t k = 0;
+            while (k + 1 < keys && times[k + 1] <= t) ++k;
+            size_t k1 = std::min(k + 1, keys - 1);
+            f32 u = 0.0f;
+            if (k1 != k && t > times[k] && s.interpolation != cgltf_interpolation_type_step)
+                u = std::clamp((t - times[k]) / std::max(times[k1] - times[k], 1e-6f), 0.0f, 1.0f);
+            const f32* a = &values[k * comps];
+            const f32* b = &values[k1 * comps];
+            JointPose& pose = clip.poses[static_cast<size_t>(f) * joints + static_cast<size_t>(joint)];
+            if (path == cgltf_animation_path_type_rotation)
+                pose.rotation = nlerpQuat({a[0], a[1], a[2], a[3]}, {b[0], b[1], b[2], b[3]}, u);
+            else {
+                const Vec3 v = lerp(Vec3{a[0], a[1], a[2]}, Vec3{b[0], b[1], b[2]}, u);
+                if (path == cgltf_animation_path_type_translation) pose.translation = v;
+                else pose.scale = v;
+            }
+        }
+    }
+    return clip;
+}
+
 struct Loader {
     ModelData& out;
     std::string path;
     std::vector<const cgltf_material*> materials;
     std::vector<std::pair<const cgltf_image*, u8>> imageKeys; // (image, usage) -> out.images index
+    const SkinState* skin = nullptr; // the model's first skin (every vertex gets weights then)
+    i32 rigidJoint = 0;              // joint of the node being read (primitives without joints follow it)
 
     u16 material(const cgltf_material* m) {
         for (size_t i = 0; i < materials.size(); ++i)
@@ -88,12 +243,15 @@ struct Loader {
     void primitive(const cgltf_primitive& prim, const f32 m[16]) {
         if (prim.type != cgltf_primitive_type_triangles) return;
         const cgltf_accessor *positions = nullptr, *normals = nullptr, *colors = nullptr, *texcoords = nullptr;
+        const cgltf_accessor *jointsAttr = nullptr, *weightsAttr = nullptr;
         for (cgltf_size i = 0; i < prim.attributes_count; ++i) {
             const cgltf_attribute& a = prim.attributes[i];
             if (a.type == cgltf_attribute_type_position) positions = a.data;
             else if (a.type == cgltf_attribute_type_normal) normals = a.data;
             else if (a.type == cgltf_attribute_type_color && a.index == 0) colors = a.data;
             else if (a.type == cgltf_attribute_type_texcoord && a.index == 0) texcoords = a.data;
+            else if (a.type == cgltf_attribute_type_joints && a.index == 0) jointsAttr = a.data;
+            else if (a.type == cgltf_attribute_type_weights && a.index == 0) weightsAttr = a.data;
         }
         if (!positions) return;
         const u16 mat = material(prim.material);
@@ -120,6 +278,20 @@ struct Loader {
             v.uv = packHalf2(t[0], t[1]);
             v.material = mat;
             mesh.vertices.push_back(v);
+            if (skin) {
+                SkinWeights sw;
+                sw.joints = static_cast<u32>(rigidJoint);
+                if (jointsAttr && weightsAttr) {
+                    cgltf_uint j[4] = {};
+                    f32 w[4] = {};
+                    cgltf_accessor_read_uint(jointsAttr, i, j, 4);
+                    cgltf_accessor_read_float(weightsAttr, i, w, 4);
+                    sw.joints = 0;
+                    for (int k = 0; k < 4; ++k) sw.joints |= static_cast<u32>(j[k] < skin->remap.size() ? skin->remap[j[k]] : 0) << (8 * k);
+                    sw.weights = packWeights(w);
+                }
+                mesh.skin.push_back(sw);
+            }
         }
         const cgltf_size indexCount = prim.indices ? prim.indices->count : positions->count;
         const bool flip = det >= 0.0f;
@@ -154,6 +326,7 @@ struct Loader {
                 std::memset(world, 0, sizeof(world));
                 world[0] = world[5] = world[10] = world[15] = 1.0f;
             }
+            rigidJoint = skin ? skin->jointOf(n) : 0;
             for (cgltf_size i = 0; i < n->mesh->primitives_count; ++i) primitive(n->mesh->primitives[i], world);
         }
         for (cgltf_size i = 0; i < n->children_count; ++i) node(n->children[i]);
@@ -254,6 +427,17 @@ bool loadGltf(const std::string& path, ModelData& out, std::string& error) {
         return false;
     }
     Loader loader{out, path, {}, {}};
+    SkinState skinState;
+    if (data->skins_count) {
+        std::string why;
+        if (readSkeleton(data->skins[0], skinState, out.skeleton, why)) {
+            for (size_t a = 0; a < data->animations_count; ++a) out.clips.push_back(bakeClip(data->animations[a], skinState, out.skeleton, a));
+            loader.skin = &skinState;
+            if (data->skins_count > 1) out.warnings.push_back(std::to_string(data->skins_count) + " skins: only the first is animated");
+        } else if (!why.empty()) {
+            out.warnings.push_back("skin not animated: " + why);
+        }
+    }
     const cgltf_scene* scene = data->scene ? data->scene : (data->scenes_count ? &data->scenes[0] : nullptr);
     if (scene) {
         for (cgltf_size i = 0; i < scene->nodes_count; ++i) loader.node(scene->nodes[i]);
@@ -261,7 +445,6 @@ bool loadGltf(const std::string& path, ModelData& out, std::string& error) {
         for (cgltf_size i = 0; i < data->nodes_count; ++i)
             if (!data->nodes[i].parent) loader.node(&data->nodes[i]);
     }
-    if (data->skins_count) out.warnings.push_back("skins and animations are shown in the bind pose");
     for (const cgltf_material* m : loader.materials) {
         MaterialData md;
         std::string name = "(default)";

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Anim.h"
+
 #include "mkrender/Mesh.h"
 
 #include <string>
@@ -24,10 +26,12 @@ struct ModelData {
     std::vector<TextureImage> images;
     Vec3 boundsMin, boundsMax;
     std::vector<std::string> warnings;    // ignored glTF features, unreadable images
+    Skeleton skeleton;                    // first skin (empty: static model); mesh.skin has one entry per vertex then
+    std::vector<AnimationClip> clips;     // its animations baked at 30 Hz
 };
 
 // Static meshes of the default scene (or first) of a .gltf/.glb, flattened with node transforms, z flipped to left-handed.
-// Skins and animations are drawn in the bind pose
+// The first skin and its animations are read like the engine's asset/ModelImport.cpp (other skins are drawn in the bind pose)
 bool loadGltf(const std::string& path, ModelData& out, std::string& error);
 
 u32 packHalf2(f32 u, f32 v);

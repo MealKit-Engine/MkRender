@@ -88,7 +88,7 @@ A host that already has a `Vec3`/`Quat`/`Mat4`, a vertex and material struct or 
 
 The file is written the way the engine's scene module writes it (same keys, order, shortest float text, `field` lines), so a scene the engine saved comes back byte for byte, and older formats are upgraded like the engine does. Game kinds' fields are kept as text, so nothing is lost without the game's code. When the project has `build/editor/kinds.txt` (written by the MealKit editor when it loads the game code, or `<game>_headless --write-kinds`; MealKit-Contract "Object kinds"), MkRender uses it for kind names, the [Add] menu, field labels, typed widgets and defaults, and rereads it when it changes.
 
-Editing beyond one object: Shift/Ctrl click and box select, Edit > Arrange (align, distribute), Drop to floor (End), hide (H) and lock, camera bookmarks (Ctrl+1..9 / 1..9) kept in the project's `build/editor/<scene>.view` like the MealKit editor, grid (G) and snap steps (View > Grid and snap), recent scenes, autosave to `build/editor/autosave/`. The Assets window places models, prefabs and PNG sprites by dragging into the view and finds where a file is used; Edit > Save selection as prefab writes `assets/prefabs/<name>.prefab`. Sprites, scatter layers and virtual camera frustums are drawn. Terrain draws its heightmap in chunks.
+Editing beyond one object: Shift/Ctrl click and box select, Edit > Arrange (align, distribute), Drop to floor (End), hide (H) and lock, camera bookmarks (Ctrl+1..9 / 1..9) kept in the project's `build/editor/<scene>.view` like the MealKit editor, grid (G) and snap steps (View > Grid and snap), recent scenes, autosave to `build/editor/autosave/`. The Assets window places models, prefabs and PNG sprites by dragging into the view and finds where a file is used; Edit > Save selection as prefab writes `assets/prefabs/<name>.prefab`. Sprites, scatter layers and virtual camera frustums are drawn. Terrain draws its heightmap in chunks. Skinned models play the clip of their `anim` field in a loop (the inspector picks it; View > Play animations), and the Assets window shows pictures of models and PNGs (Pictures box).
 
 Brushes (select a terrain or scatter layer, B or the inspector's Brush box): terrain raise/lower/flatten/smooth and scatter paint/erase (Shift erases) onto terrain and floors, with the radius and strength in the inspector; a stroke is one undo step, and the painted 16-bit PNG and `.scatter` file are written when the scene is saved. A terrain or layer without a file gets a new one (`assets/terrain/<scene>_<id>.png` / `.scatter`).
 
@@ -96,7 +96,7 @@ Rendering parts like the engine: the sky HDRI (baked once into the project's `bu
 
 ```
 MkRender [--project <folder>] [--file <.scene|.gltf|.glb>] [--select <id>] [--lighting pbr|toon|unlit]
-         [--debug-layer] [--frames N --capture out.png] [--bake-probes] [--grading-capture] [--editor-play] [--version]
+         [--debug-layer] [--frames N --capture out.png] [--bake-probes] [--grading-capture] [--editor-play] [--window <name>] [--version]
 MkRender --check-scene <file.scene>   # read + write in memory: same / upgraded / FAIL with the first differing line
 MkRender --check-terrain <file.png|file.scatter>   # decode + encode with mkterrain: same bytes, or the same samples from another encoder
 ```

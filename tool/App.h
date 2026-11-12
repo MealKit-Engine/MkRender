@@ -9,6 +9,7 @@
 #include <mkcontract/Live.h>
 
 #include <deque>
+#include <map>
 #include <filesystem>
 #include <mutex>
 #include <set>
@@ -56,7 +57,8 @@ public:
     void linkPlay(bool fromHere);
     void linkStop();
     void linkLook(u32 cameraId, const std::string& cutscene = {});
-    bool linkPlayWhenReady = false; // --editor-play: play once an editor is found
+    bool linkPlayWhenReady = false;
+    std::string focusWindow; // --window <name>: brings that docked window to the front (captures for docs and checks) // --editor-play: play once an editor is found
 
 private:
     enum class Pending { None, Quit, OpenPath, NewScene };
@@ -208,6 +210,24 @@ private:
 
     LightingModel m_lighting = LightingModel::Pbr;
     std::vector<PointLight> m_lights;
+    bool m_playAnims = true;
+    // Asset thumbnails (Assets window): models and PNGs drawn into small offscreen targets, one per frame, redrawn when the file changes
+    struct Thumb {
+        mkrhi::RenderTarget target{};
+        bool drawn = false;
+        long long fileTime = 0;
+        f64 checked = -10.0;
+    };
+    std::map<std::string, Thumb> m_thumbs;
+    std::string m_thumbNext; // set by fill(), drawn by renderOffscreen()
+    DrawList m_thumbList;
+    FrameParams m_thumbFrame;
+    LightingModel m_thumbLighting = LightingModel::Pbr;
+    bool m_showThumbs = true;
+    u64 thumbnail(const std::string& path); // ImGui texture id, 0 while not drawn yet
+    void prepareThumbnail();
+    std::vector<JointPose> m_pose; // skinned model drawing scratch
+    std::vector<BoneMatrix> m_palette;
     // Sky HDRI, LUT and probes of this frame (fill() resolves them, frameParams() passes them)
     u32 m_environmentId = 0, m_lutId = 0;
     std::vector<ReflectionProbe> m_probeList;
@@ -240,6 +260,7 @@ private:
     std::string m_linkMode, m_linkScene; // editor's state: "edit"/"play", its open scene
     bool m_linkGame = false, m_linkDirty = false;
     f64 m_linkPollAt = 0.0;
+    std::set<u32> m_linkDead; // editor pids that didn't answer
     char m_cutsceneName[64] = {};
     std::vector<std::string> m_modelProblems; // model files that failed (logged once)
 

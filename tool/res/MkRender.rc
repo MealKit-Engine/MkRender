@@ -1,0 +1,3 @@
+#pragma code_page(65001)
+// MkRender.exe resources. Icon 1 is the app icon (window, taskbar, shortcuts): made by the MealKit engine's tools/make_suite_icons.py (engine docs/TOOL_DESIGN.md section 5)
+1 ICON "MkRender.ico"

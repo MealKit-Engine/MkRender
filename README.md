@@ -96,10 +96,12 @@ Rendering parts like the engine: the sky HDRI (baked once into the project's `bu
 
 ```
 MkRender [--project <folder>] [--file <.scene|.gltf|.glb>] [--select <id>] [--lighting pbr|toon|unlit]
-         [--debug-layer] [--frames N --capture out.png] [--bake-probes] [--grading-capture] [--version]
+         [--debug-layer] [--frames N --capture out.png] [--bake-probes] [--grading-capture] [--editor-play] [--version]
 MkRender --check-scene <file.scene>   # read + write in memory: same / upgraded / FAIL with the first differing line
 MkRender --check-terrain <file.png|file.scatter>   # decode + encode with mkterrain: same bytes, or the same samples from another encoder
 ```
+
+Playing goes through the project's running MealKit editor (MealKit-Contract "Scene service" on the live connection): MkRender finds it in `<project>/build/live/`, and the Editor menu (F5, Shift+F5) saves the scene and asks the editor to play it in its play view, from this view's camera with Shift (solo; a selected spawn point is used as is), stop, look through the selected virtual camera or preview a cutscene. The editor's [Scenes] window and asset menu open a scene here with "Open in MkRender".
 
 A `.gltf`/`.glb` opens in a new unsaved scene as one decoration. The build writes `mealkit-tool.txt` next to the exe (`opens .scene .gltf .glb`), so the MealKit editor lists MkRender in its [Tools] menu when that folder is in `%LOCALAPPDATA%\MealKit\tools\render\` or given with `--tool-path`; the editor starts tools with `--project <folder> --file <file>`.
 
@@ -125,7 +127,7 @@ Options for a host project that adds it with `add_subdirectory`:
 | `MKBAKE_BC`, `MKBAKE_BC7ENC_DIR` | BC7/BC5 compression in `mkbake` (default on) and the bc7enc folder (default `third_party/bc7enc`) |
 | `MKRENDER_BUILD_TOOL` | the scene editor (default: on when built standalone on Windows; it needs `mkrender`, so a DXC) |
 
-`third_party/` holds what the standalone build and the scene editor use: Vulkan-Headers, volk, VMA, SDL3, Dear ImGui (docking), ImGuizmo, cgltf, stb_image, stb_image_write and bc7enc (`mkbake`), each with its license. A host that adds MkRender with `add_subdirectory` uses its own copies through the variables above.
+`third_party/` holds what the standalone build and the scene editor use: Vulkan-Headers, volk, VMA, SDL3, Dear ImGui (docking), ImGuizmo, cgltf, stb_image, stb_image_write, bc7enc and mkcontract (MealKit-Contract's live client, copied with its `tools/vendor.ps1`) (`mkbake`), each with its license. A host that adds MkRender with `add_subdirectory` uses its own copies through the variables above.
 
 GPU capture tools (RenderDoc, PIX) are loaded by the host from `DeviceDesc::beforeDeviceCreate`, which runs right before the device is made.
 

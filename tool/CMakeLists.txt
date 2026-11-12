@@ -4,9 +4,13 @@
 # Libraries (SDL3, ImGui) come from Libs.cmake, included before mkrhi.
 
 set(imguizmo ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imguizmo/ImGuizmo.cpp)
+# Tool contract (MealKit-Contract, copied into third_party/mkcontract with that repo's tools/vendor.ps1): live connection to the editor
+set(MKCONTRACT_BUILD_TESTS OFF)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/mkcontract ${CMAKE_CURRENT_BINARY_DIR}/mkcontract)
+
 add_executable(MkRender WIN32 main.cpp App.h App.cpp Assets.h Assets.cpp Model.h Model.cpp SceneFile.h SceneFile.cpp ${imguizmo})
 target_include_directories(MkRender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imguizmo)
-target_link_libraries(MkRender PRIVATE mkrender mkbake mkterrain mkrender_imgui SDL3::SDL3-static)
+target_link_libraries(MkRender PRIVATE mkrender mkbake mkterrain mkcontract_client mkrender_imgui SDL3::SDL3-static)
 target_include_directories(MkRender SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cgltf ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb)
 if(MSVC)
     target_compile_options(MkRender PRIVATE /W4 /permissive- /utf-8)

@@ -1,7 +1,7 @@
 // MkRender executable: SDL3 window, mkrender drawing into it (DX12 or Vulkan, the backend MkRender was built with),
 // Dear ImGui panels drawn by mkrhi's ImGui backend. The actual screen is App (scene editor).
 //   MkRender [--project <MealKit project folder>] [--file <.scene|.gltf|.glb>] [file] [--select <id>[,<id>...]]
-//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--version]
+//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--editor-play] [--version]
 //   MkRender --check-terrain <file.png|file.scatter>   decodes and encodes with mkterrain: "TERRAIN same" when the bytes come back
 //   MkRender --check-scene <file.scene>   reads and writes the scene in memory: "SCENE same" when the text comes back
 //            unchanged, "SCENE equal" when only float text differs (old %.9g files), else the first differing line (exit 1)
@@ -165,6 +165,7 @@ int checkScene(const std::string& path) {
 
 int main(int argc, char** argv) {
     std::string project, file, capture;
+    bool editorPlay = false; // --editor-play: ask the project's running editor to play the scene once it's found
     bool bakeProbes = false, gradingCapture = false; // --bake-probes, --grading-capture: run once after opening (with --frames for scripts)
     long frames = 0; // --frames N: quit after N frames (--capture saves the last one as PNG, for docs and tests)
     std::string selectIds; // --select 5 or 5,7,9
@@ -179,6 +180,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--debug-layer") == 0) debugLayer = true;
         else if (std::strcmp(argv[i], "--bake-probes") == 0) bakeProbes = true;
         else if (std::strcmp(argv[i], "--grading-capture") == 0) gradingCapture = true;
+        else if (std::strcmp(argv[i], "--editor-play") == 0) editorPlay = true;
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--check-terrain") == 0 && i + 1 < argc) return checkTerrain(argv[++i]);
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
@@ -260,6 +262,7 @@ int main(int argc, char** argv) {
     }
     if (bakeProbes) app.bakeProbes();
     if (gradingCapture) app.requestGradingCapture();
+    app.linkPlayWhenReady = editorPlay;
 
     mkrender::DrawList list;
     Uint64 last = SDL_GetPerformanceCounter();

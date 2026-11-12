@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder (first layout)
 #include <ImGuizmo.h>
+#include <mkcontract/Client.h>
 
 #include <algorithm>
 #include <climits>
@@ -1214,6 +1215,116 @@ void App::drawBrushInspector(Entity& e) {
     ImGui::EndDisabled();
 }
 
+// ---------------------------------------------------------------- Editor link
+
+namespace {
+std::string jsonValue(const std::string& json, const char* key) { // flat JSON: the text after "key": up to , or }
+    const std::string k = std::string("\"") + key + "\":";
+    size_t at = json.find(k);
+    if (at == std::string::npos) return {};
+    at += k.size();
+    if (at < json.size() && json[at] == '"') {
+        const size_t end = json.find('"', at + 1);
+        return end == std::string::npos ? std::string() : json.substr(at + 1, end - at - 1);
+    }
+    const size_t end = json.find_first_of(",}", at);
+    return json.substr(at, end == std::string::npos ? std::string::npos : end - at);
+}
+} // namespace
+
+void App::pollLink() {
+    if (m_project.empty() || m_time < m_linkPollAt) return;
+    m_linkPollAt = m_time + 1.0;
+    const bool was = m_linkFound;
+    m_linkFound = false;
+    for (const mkcontract::live::Instance& in : mkcontract::live::findInstances(m_project)) {
+        if (in.kind != "editor") continue;
+        const mkcontract::live::HttpResult r = mkcontract::live::request(in, "GET", "scene/state");
+        if (r.status != 200) continue; // gone, or an editor without the scene service
+        m_editor = in;
+        m_linkFound = true;
+        m_linkMode = jsonValue(r.body, "mode");
+        m_linkScene = jsonValue(r.body, "scene");
+        m_linkGame = jsonValue(r.body, "game") == "true";
+        m_linkDirty = jsonValue(r.body, "dirty") == "true";
+        break;
+    }
+    if (m_linkFound != was) log(m_linkFound ? "MealKit editor found (pid " + std::to_string(m_editor.pid) + "): F5 plays the saved scene there" : "MealKit editor link lost");
+    if (m_linkFound && linkPlayWhenReady && m_linkGame) {
+        linkPlayWhenReady = false;
+        linkPlay(false);
+    }
+}
+
+bool App::linkPost(const char* path, const std::string& body) {
+    if (!m_linkFound) {
+        log("No MealKit editor is running for this project (open the project in the editor)");
+        return false;
+    }
+    const mkcontract::live::HttpResult r = mkcontract::live::request(m_editor, "POST", path, body, 2000);
+    if (r.status == 200) {
+        m_linkPollAt = 0.0; // refresh the state soon
+        return true;
+    }
+    const std::string error = jsonValue(r.body, "error");
+    log(std::string("Editor: ") + (r.status == 0 ? "no answer" : error.empty() ? "error " + std::to_string(r.status) : error));
+    return false;
+}
+
+void App::linkPlay(bool fromHere) {
+    if (m_path.empty()) {
+        log("Save the scene into the project first: the editor plays the saved file");
+        return;
+    }
+    if (dirty() && !save()) return;
+    const std::string file = m_assets.relative(m_path);
+    std::string body = "file=" + mkcontract::live::urlEncode(file);
+    if (fromHere) {
+        const Vec3 eye = cameraEye();
+        body += "&from=1&x=" + floatText(eye.x) + "&y=" + floatText(eye.y) + "&z=" + floatText(eye.z) + "&yaw=" + floatText(m_yaw) +
+                "&spawn=" + std::to_string(m_selected);
+    }
+    if (linkPost("scene/play", body)) log(std::string("Editor plays ") + file + (fromHere ? " from this camera" : ""));
+}
+
+void App::linkStop() {
+    if (linkPost("scene/stop", "")) log("Editor: stop");
+}
+
+void App::linkLook(u32 cameraId, const std::string& cutscene) {
+    if (m_path.empty()) return;
+    if (dirty() && !save()) return;
+    std::string body = "file=" + mkcontract::live::urlEncode(m_assets.relative(m_path));
+    body += cutscene.empty() ? "&camera=" + std::to_string(cameraId) : "&cutscene=" + mkcontract::live::urlEncode(cutscene);
+    if (linkPost("scene/look", body)) log(cutscene.empty() ? "Editor looks through camera " + std::to_string(cameraId) : "Editor previews cutscene " + cutscene);
+}
+
+void App::drawLinkMenu() {
+    if (!ImGui::BeginMenu("Editor")) return;
+    if (m_project.empty()) ImGui::TextDisabled("Open a project: MkRender looks for its running MealKit editor");
+    else if (!m_linkFound) ImGui::TextDisabled("No MealKit editor running for this project");
+    else {
+        ImGui::TextDisabled("Editor (pid %u): %s, %s%s", m_editor.pid, m_linkMode == "play" ? "playing" : "editing",
+                            m_linkScene.empty() ? "no scene" : m_linkScene.c_str(), m_linkDirty ? " (unsaved there)" : "");
+        if (!m_linkGame) ImGui::TextDisabled("Its game code isn't loaded yet (build it in the editor)");
+    }
+    const bool can = m_linkFound && m_linkGame && m_linkMode != "play";
+    if (ImGui::MenuItem("Play in editor", "F5", false, can)) linkPlay(false);
+    if (ImGui::MenuItem("Play from here", "Shift+F5", false, can)) linkPlay(true);
+    ImGui::SetItemTooltip("Solo play from this camera (or from the selected spawn point)");
+    if (ImGui::MenuItem("Stop", "F5", false, m_linkFound && m_linkMode == "play")) linkStop();
+    ImGui::Separator();
+    const Entity* e = m_scene.find(m_selected);
+    if (ImGui::MenuItem("Look through selected camera", nullptr, false, m_linkFound && e && e->is(kKindCamera) && m_linkMode != "play")) linkLook(e->id);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+    ImGui::InputTextWithHint("##cutscene", "cutscene name", m_cutsceneName, sizeof(m_cutsceneName));
+    ImGui::SameLine();
+    if (ImGui::Button("Preview") && m_cutsceneName[0] && m_linkFound) linkLook(0, m_cutsceneName);
+    if (ImGui::MenuItem("End preview", nullptr, false, m_linkFound && m_linkMode != "play")) linkStop();
+    ImGui::TextDisabled("The editor plays and previews the saved scene file; MkRender saves first.");
+    ImGui::EndMenu();
+}
+
 // ---------------------------------------------------------------- Probes and grading
 
 void App::bakeProbes(u32 onlyId) {
@@ -1495,6 +1606,7 @@ void App::frame(f64 dt) {
     checkExternalChange();
     autosave();
     if (!m_project.empty() && fileTime(kindsPath()) != m_kindsTime) reloadKinds();
+    pollLink();
 
     const ImGuiID dockspace = ImGui::GetID("MkRenderDock");
     if (!m_layoutDone) {
@@ -1666,6 +1778,7 @@ void App::drawMenu() {
             if (ImGui::MenuItem("Save selection as prefab...", nullptr, false, m_selected != 0 && !m_assets.assetsDir().empty())) m_prefabPopup = true;
             ImGui::EndMenu();
         }
+        drawLinkMenu();
         if (ImGui::BeginMenu("View")) {
             if (ImGui::MenuItem("Frame selection", "F", false, m_selected != 0)) frameSelected();
             if (ImGui::MenuItem("Move", "W", m_gizmo == Gizmo::Translate)) m_gizmo = Gizmo::Translate;
@@ -1782,6 +1895,10 @@ void App::drawMenu() {
             if (ImGui::IsKeyPressed(ImGuiKey_E)) m_gizmo = Gizmo::Rotate;
             if (ImGui::IsKeyPressed(ImGuiKey_R)) m_gizmo = Gizmo::Scale;
             if (ImGui::IsKeyPressed(ImGuiKey_F)) frameSelected();
+            if (ImGui::IsKeyPressed(ImGuiKey_F5) && m_linkFound) {
+                if (m_linkMode == "play") linkStop();
+                else linkPlay(io.KeyShift);
+            }
         }
     }
 }

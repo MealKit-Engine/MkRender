@@ -6,6 +6,8 @@
 #include "mkrender/DrawList.h"
 #include "mkrender/Renderer.h"
 
+#include <mkcontract/Live.h>
+
 #include <deque>
 #include <filesystem>
 #include <mutex>
@@ -49,6 +51,12 @@ public:
     bool bakingProbes() const { return !m_probeQueue.empty(); }
     // The view without LUT to art/grading/<scene>.png, with art/grading/neutral.cube beside it (grade it, export a .cube to assets/lut)
     void requestGradingCapture() { m_gradeRequested = true; }
+    // Editor link (MealKit-Contract "Scene service"): the project's running MealKit editor plays the saved scene in its play view.
+    // Play saves first; fromHere plays from this view's camera (solo), with the selected spawn point if one is selected
+    void linkPlay(bool fromHere);
+    void linkStop();
+    void linkLook(u32 cameraId, const std::string& cutscene = {});
+    bool linkPlayWhenReady = false; // --editor-play: play once an editor is found
 
 private:
     enum class Pending { None, Quit, OpenPath, NewScene };
@@ -223,6 +231,16 @@ private:
     Image m_gradeCapture;
     void finishProbeFace();
     void finishGradingCapture();
+    // Editor link
+    void pollLink();
+    bool linkPost(const char* path, const std::string& body);
+    void drawLinkMenu();
+    bool m_linkFound = false;
+    mkcontract::live::Instance m_editor;
+    std::string m_linkMode, m_linkScene; // editor's state: "edit"/"play", its open scene
+    bool m_linkGame = false, m_linkDirty = false;
+    f64 m_linkPollAt = 0.0;
+    char m_cutsceneName[64] = {};
     std::vector<std::string> m_modelProblems; // model files that failed (logged once)
 
     bool m_brushOn = false;

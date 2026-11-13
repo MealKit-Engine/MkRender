@@ -42,6 +42,7 @@ public:
     void select(u32 id);
     void addToSelection(u32 id) { syncSelection(); if (!isSelected(id)) clickSelect(id, true); }
     void setLightingModel(LightingModel model);
+    void setDebugView(DebugView view) { m_debugView = view; } // --view-mode
     std::string title() const;
     void log(const std::string& line);
     void saveScreenshot(const std::string& path, bool withUi);
@@ -270,6 +271,18 @@ private:
     f32 m_clickX = 0, m_clickY = 0;
 
     LightingModel m_lighting = LightingModel::Pbr;
+    // View modes (the engine editor's: lit, wireframe, normals, LOD, overdraw, over budget, material features). The scene view only;
+    // thumbnails, look dev, probe bakes and the grading capture always draw lit. A pill at the viewport's top left picks one
+    DebugView m_debugView = DebugView::None;
+    void drawViewMode();
+    bool viewModeItems(); // the seven choices, as menu items (View menu and the pill); true when one was picked
+    // Model budgets for DebugView::Budget: the engine's asset/Budget.h defaults, overridden by mealkit.project budget<Kind><Item> lines
+    struct ModelLimits {
+        u32 triangles = 0, textureSize = 0, bones = 0, materials = 0;
+    };
+    ModelLimits m_budgets[3] = {{15000, 2048, 64, 4}, {3000, 1024, 0, 2}, {20000, 2048, 0, 4}}; // characters, props, environment
+    void loadBudgets();
+    bool overBudget(const std::string& modelPath, const ModelEntry& model) const;
     std::vector<PointLight> m_lights;
     bool m_playAnims = true;
     bool m_shot = false;

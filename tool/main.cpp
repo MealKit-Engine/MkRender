@@ -302,6 +302,7 @@ int main(int argc, char** argv) {
     std::string selectIds; // --select 5 or 5,7,9
     bool debugLayer = false;
     int lighting = -1;
+    int viewMode = 0; // --view-mode: render::DebugView (0 lit)
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = std::strtol(argv[++i], nullptr, 10);
         else if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) capture = argv[++i];
@@ -317,6 +318,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--render-golden") == 0 && i + 2 < argc) goldenShots = argv[++i], goldenOut = argv[++i];
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--check-terrain") == 0 && i + 1 < argc) return checkTerrain(argv[++i]);
+        else if (std::strcmp(argv[i], "--view-mode") == 0 && i + 1 < argc) viewMode = std::atoi(argv[++i]); // 0 lit .. 6 material features
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
             lighting = v == "toon" ? 1 : v == "unlit" ? 2 : 0;
@@ -361,6 +363,7 @@ int main(int argc, char** argv) {
     desc.height = static_cast<mkrender::u32>(ph);
     desc.debugLayer = debugLayer;
     desc.pipelineCache = prefDir;
+    desc.debugViews = true; // View > View Mode (the engine editor's view modes)
     mkrender::Renderer renderer;
     if (!renderer.init(desc)) {
         const std::string why = std::string("The renderer could not start: ") + renderer.initError();
@@ -392,6 +395,7 @@ int main(int argc, char** argv) {
     if (!project.empty() && file.empty()) app.openProject(project);
     else if (!file.empty()) app.openFile(file);
     if (lighting >= 0) app.setLightingModel(static_cast<mkrender::LightingModel>(lighting));
+    if (viewMode > 0 && viewMode < static_cast<int>(mkrender::DebugView::Count)) app.setDebugView(static_cast<mkrender::DebugView>(viewMode));
     for (const char* c = selectIds.c_str(); *c;) {
         char* end = nullptr;
         const unsigned long id = std::strtoul(c, &end, 10);

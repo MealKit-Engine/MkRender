@@ -218,6 +218,8 @@ const ModelEntry& Assets::model(const std::string& path) {
     entry.triangles = static_cast<u32>(data.mesh.indices.size() / 3);
     entry.materials = static_cast<u32>(data.materials.size());
     entry.textures = static_cast<u32>(data.images.size());
+    for (const TextureImage& image : data.images) entry.textureSize = std::max({entry.textureSize, image.width, image.height});
+    entry.bones = static_cast<u32>(data.skeleton.joints.size());
     entry.skeleton = std::move(data.skeleton);
     entry.clips = std::move(data.clips);
     return entry;

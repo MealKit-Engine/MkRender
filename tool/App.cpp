@@ -1,4 +1,5 @@
 #include "App.h"
+#include "Form.h"
 #include "Strings.h"
 
 #include <SDL3/SDL.h>
@@ -20,6 +21,7 @@
 #include <sstream>
 
 namespace mkrender::tool {
+namespace form = mktool::form;
 namespace {
 
 constexpr f32 kPi = 3.14159265358979f;
@@ -232,18 +234,8 @@ bool inputString(const char* label, std::string& value) {
     return true;
 }
 
-// Label on the left, widget filling the rest (names don't get cut off like with ImGui's right-hand labels)
-void row(const char* label) {
-    ImGui::AlignTextToFramePadding();
-    const f32 width = ImGui::GetFontSize() * 7.5f - ImGui::GetStyle().ItemSpacing.x;
-    const ImVec2 at = ImGui::GetCursorScreenPos();
-    ImGui::PushClipRect(at, {at.x + width, at.y + ImGui::GetFrameHeight()}, true);
-    ImGui::TextUnformatted(label);
-    ImGui::PopClipRect();
-    if (ImGui::CalcTextSize(label).x > width) ImGui::SetItemTooltip("%s", label); // cut off: the whole name on hover
-    ImGui::SameLine(ImGui::GetFontSize() * 7.5f);
-    ImGui::SetNextItemWidth(-1.0f);
-}
+// Label on the left, widget filling the rest: the shared form row (tool/Form.h), so every Mk tool lines up the same way
+void row(const char* label) { form::label(label); }
 
 struct CaptureJob {
     App* app;
@@ -324,6 +316,7 @@ bool App::openProject(const std::string& dir) {
     const std::string model = projectSetting("lightingModel");
     setLightingModel(model == "Toon" ? LightingModel::Toon : model == "Unlit" ? LightingModel::Unlit : LightingModel::Pbr);
     m_view2d = projectSetting("view2d") == "true";
+    loadBudgets();
     if (m_view2d) { // face the XY plane around the origin
         m_yaw = m_pitch = 0.0f;
         m_pivot = {0.0f, 0.0f, 0.0f};
@@ -336,6 +329,34 @@ bool App::openProject(const std::string& dir) {
     if (!scenes.empty()) return loadScenePath(m_assets.resolve(scenes.front()));
     newScene();
     return true;
+}
+
+void App::loadBudgets() {
+    // Engine asset/Budget.h defaults, then the project's budget<Kind><Item> lines (the engine's project settings window writes them)
+    const ModelLimits defaults[3] = {{15000, 2048, 64, 4}, {3000, 1024, 0, 2}, {20000, 2048, 0, 4}};
+    const char* kinds[3] = {"Characters", "Props", "Environment"};
+    for (int k = 0; k < 3; ++k) {
+        m_budgets[k] = defaults[k];
+        const auto read = [&](const char* item, u32& value) {
+            const std::string text = projectSetting(std::string("budget") + kinds[k] + item);
+            if (!text.empty()) value = static_cast<u32>(std::strtoul(text.c_str(), nullptr, 10));
+        };
+        read("Triangles", m_budgets[k].triangles);
+        read("TextureSize", m_budgets[k].textureSize);
+        read("Bones", m_budgets[k].bones);
+        read("Materials", m_budgets[k].materials);
+    }
+}
+
+bool App::overBudget(const std::string& modelPath, const ModelEntry& model) const {
+    // Kind by folder like the engine (asset/Budget.h modelKind): models/characters/..., models/environment/..., anything else a prop
+    std::string p = modelPath;
+    std::replace(p.begin(), p.end(), '\\', '/');
+    const size_t start = p.rfind("models/", 0) == 0 ? 7 : 0;
+    const size_t slash = p.find('/', start);
+    const std::string folder = slash == std::string::npos ? std::string() : p.substr(start, slash - start);
+    const ModelLimits& b = m_budgets[folder == "characters" ? 0 : folder == "environment" ? 2 : 1];
+    return model.triangles > b.triangles || model.materials > b.materials || model.bones > b.bones || model.textureSize > b.textureSize;
 }
 
 bool App::openFile(const std::string& path) {
@@ -1131,6 +1152,7 @@ FrameParams App::frameParams() const {
     p.fogColor = env.fogColor;
     p.fogDensity = env.fogDensity;
     p.time = m_shot ? 0.0f : static_cast<f32>(m_time);
+    p.debugView = m_debugView; // the scene view only: probe bakes and the grading capture set None again
     PostParams& post = p.post;
     post.toneMapping = env.postValue("toneMapping") != "false";
     post.punchy = env.postValue("punchy") != "false";
@@ -1283,7 +1305,7 @@ bool App::brushInput(bool free) {
 
 void App::drawBrushInspector(Entity& e) {
     const bool terrain = e.is(kKindTerrain);
-    ImGui::SeparatorText(terrain ? tr("Terrain brush") : tr("Scatter brush"));
+    form::section(terrain ? tr("Terrain brush") : tr("Scatter brush"));
     const std::string key = terrain ? "heightmap" : "file";
     std::string path = e.field(key);
     if (path.empty()) {
@@ -1339,9 +1361,9 @@ void App::drawBrushInspector(Entity& e) {
         if (radioButton(tr("Erase"), m_scatterErase)) m_scatterErase = true;
     }
     row(tr("Radius (m)"));
-    ImGui::SliderFloat("##bradius", &m_brushRadius, 0.5f, 64.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+    form::slider("##bradius", &m_brushRadius, 0.5f, 64.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
     row(tr("Strength"));
-    ImGui::SliderFloat("##bstrength", &m_brushStrength, 0.01f, 1.0f, "%.2f");
+    form::slider("##bstrength", &m_brushStrength, 0.01f, 1.0f, "%.2f");
     ImGui::TextDisabled(terrain ? tr("Left drag paints; Flatten keeps the height under the stroke start; Ctrl+Z undoes a stroke")
                                 : tr("Left drag paints onto terrain and floors (Shift erases); density and sizes are fields below"));
     ImGui::EndDisabled();
@@ -1582,6 +1604,7 @@ void App::renderOffscreen() {
         frame.viewProj = lookAtLH(eye, eye + forward, cubeFaceUp(m_probeFace)) * perspectiveReversedZ(3.14159265f * 0.5f, 1.0f, 0.05f, 2000.0f);
         frame.cameraPos = eye;
         frame.cameraForward = forward;
+        frame.debugView = DebugView::None; // a bake is the lit scene whatever the view shows
         frame.probes = nullptr; // other probes' old images don't mix in
         frame.probeCount = 0;
         frame.post.toneMapping = false; // reflections stay linear (tone mapping happens once on the screen that receives them)
@@ -1601,6 +1624,7 @@ void App::renderOffscreen() {
         FrameParams frame = frameParams();
         frame.viewport = {0.0f, 0.0f, static_cast<f32>(w), static_cast<f32>(h)};
         frame.post.lut = 0; // the image before grading (up to tone mapping)
+        frame.debugView = DebugView::None;
         r.drawToTarget(m_gradeTarget, frame, m_bakeList, m_lighting);
         r.captureTarget(m_gradeTarget, &m_gradeCapture);
         m_gradeCapturePending = true;
@@ -1842,11 +1866,14 @@ void App::addScene(DrawList& list) {
                 inst.position = w.position;
                 inst.rotation = w.rotation;
                 inst.scale = w.scale;
+                if (m_debugView == DebugView::Budget && overBudget(e.model, m)) inst.flags |= kInstanceOverBudget;
                 list.addSkinned(m.mesh, inst, m_palette.data(), static_cast<u32>(m_palette.size()));
                 continue;
             }
-            if (m.ok) mesh = m.mesh;
-            else if (std::find(m_modelProblems.begin(), m_modelProblems.end(), e.model) == m_modelProblems.end()) {
+            if (m.ok) {
+                mesh = m.mesh;
+                if (m_debugView == DebugView::Budget && overBudget(e.model, m)) inst.flags |= kInstanceOverBudget;
+            } else if (std::find(m_modelProblems.begin(), m_modelProblems.end(), e.model) == m_modelProblems.end()) {
                 m_modelProblems.push_back(e.model);
                 log("Model " + e.model + ": " + m.error + " (drawn as a box)");
             }
@@ -1911,6 +1938,7 @@ void App::frame(f64 dt) {
     drawLookDev();
     drawStats();
     drawOverlay();
+    drawViewMode();
     drawGizmo();
     drawFieldHandles();
     viewportInput();
@@ -2058,6 +2086,11 @@ void App::drawMenu() {
         }
         drawLinkMenu();
         if (ImGui::BeginMenu(tr("View"))) {
+            if (ImGui::BeginMenu(tr("View Mode"))) {
+                viewModeItems();
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(tr("Frame selection"), "F", false, m_selected != 0)) frameSelected();
             if (ImGui::MenuItem(tr("Move"), "W", m_gizmo == Gizmo::Translate)) m_gizmo = Gizmo::Translate;
             if (ImGui::MenuItem(tr("Rotate"), "E", m_gizmo == Gizmo::Rotate)) m_gizmo = Gizmo::Rotate;
@@ -2306,6 +2339,78 @@ bool App::iconButton(const char* glyph, const char* name, const char* detail) {
     return pressed;
 }
 
+namespace {
+constexpr const char* kIconView = "\xEE\xA2\x90"; // U+E890 View: the view mode pill
+// The engine editor's view mode names and order (render::DebugView), with what the colors mean
+struct ViewModeInfo {
+    const char* name;
+    const char* legend; // under the pill while the mode is on (nullptr: nothing to read)
+};
+constexpr ViewModeInfo kViewModes[] = {
+    {"Lit", nullptr},
+    {"Wireframe", nullptr},
+    {"Normals", "Color is the surface direction: red X, green Y, blue Z"},
+    {"LOD Level", "LOD 0 green, 1 yellow, 2 red"},
+    {"Overdraw", "Brighter where the same pixel is drawn more times"},
+    {"Over Budget", "Red: over the model budget of mealkit.project"},
+    {"Material Features", "Outline red, wind green, rim blue, dissolve yellow, none gray"},
+};
+static_assert(sizeof(kViewModes) / sizeof(kViewModes[0]) == static_cast<size_t>(DebugView::Count), "one name per DebugView");
+} // namespace
+
+bool App::viewModeItems() {
+    bool picked = false;
+    for (u32 i = 0; i < static_cast<u32>(DebugView::Count); ++i) {
+        const auto view = static_cast<DebugView>(i);
+        // MkRender loads a model's full mesh only (LODs are made when the engine cooks it), so its LOD view would be all green
+        const bool lodOnly = view == DebugView::Lod;
+        const bool usable = m_renderer->supportsDebugView(view) && !lodOnly;
+        if (ImGui::MenuItem(tr(kViewModes[i].name), nullptr, m_debugView == view, usable)) {
+            m_debugView = view;
+            picked = true;
+        }
+        if (lodOnly) ImGui::SetItemTooltip("%s", tr("MkRender draws each model's full mesh: LOD levels show in the MealKit editor"));
+        if (i == 0) ImGui::Separator();
+    }
+    return picked;
+}
+
+void App::drawViewMode() {
+    // A pill at the viewport's top left, like the editor's view mode box: lit stays quiet, any other mode is accent-filled
+    // so nobody mistakes a debug view for the scene's look
+    const bool on = m_debugView != DebugView::None;
+    ImGui::SetNextWindowPos({m_uiX + 10.0f, m_uiY + 10.0f});
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::Begin("##viewMode", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking |
+                                            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings);
+    // Glyphs from the icon font (the text font has no small triangle): View, the name, ChevronDown U+E70D
+    const char* name = tr(kViewModes[static_cast<u32>(m_debugView)].name);
+    const std::string label = iconFont ? std::string(kIconView) + "  " + name + "  \xEE\x9C\x8D##viewModePill" : std::string(name) + " v##viewModePill";
+    const ImGuiStyle& style = ImGui::GetStyle();
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, ImGui::GetFrameHeight() * 0.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {style.FramePadding.x * 1.5f, style.FramePadding.y});
+    ImGui::PushStyleColor(ImGuiCol_Button, on ? kAccent : ImVec4(0.08f, 0.08f, 0.09f, 0.82f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? kAccentHover : ImVec4(0.16f, 0.16f, 0.18f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, on ? kAccentDown : ImVec4(0.20f, 0.20f, 0.22f, 0.95f));
+    if (ImGui::Button(label.c_str())) ImGui::OpenPopup("##viewModes");
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar(2);
+    ImGui::SetItemTooltip("%s", tr("View Mode"));
+    if (ImGui::BeginPopup("##viewModes")) {
+        viewModeItems();
+        ImGui::EndPopup();
+    }
+    if (const char* legend = kViewModes[static_cast<u32>(m_debugView)].legend; legend && on) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.92f, 0.94f, 1.0f));
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const ImVec2 size = ImGui::CalcTextSize(tr(legend));
+        ImGui::GetWindowDrawList()->AddRectFilled({at.x - 6.0f, at.y - 2.0f}, {at.x + size.x + 6.0f, at.y + size.y + 2.0f}, IM_COL32(16, 16, 18, 200), 6.0f);
+        ImGui::TextUnformatted(tr(legend));
+        ImGui::PopStyleColor();
+    }
+    ImGui::End();
+}
+
 void App::drawLanguageButton() {
     // The name in English too while another language is on, so someone who can't read it still knows the button
     const std::string name = std::strcmp(language(), "en") == 0 ? std::string("Language") : std::string(tr("Language")) + " (Language)";
@@ -2534,7 +2639,7 @@ void App::drawInspector() {
                 inputString("##folder", e.folder);
             }
 
-            ImGui::SeparatorText(tr("Transform (parent-relative)"));
+            form::section(tr("Transform (parent-relative)"));
             row(tr("Position"));
             ImGui::DragFloat3("##pos", &e.position.x, 0.05f, 0.0f, 0.0f, "%.3f");
             if (m_eulerFor != e.id) m_euler = toEuler(e.rotation);
@@ -2544,7 +2649,7 @@ void App::drawInspector() {
             row(tr("Scale"));
             ImGui::DragFloat3("##scale", &e.scale.x, 0.02f, 0.0f, 0.0f, "%.3f");
 
-            ImGui::SeparatorText(tr("Look"));
+            form::section(tr("Look"));
             const KindInfo* info = findKind(e.kind);
             const bool modelKind = !info || (!info->marker && !info->area && !e.is(kKindTerrain) && !e.is(kKindScatter) && !e.is(kKindSprite));
             if (modelKind) {
@@ -2601,7 +2706,7 @@ void App::drawInspector() {
                 ImGui::TextDisabled(e.field("bake").empty() ? tr("not baked") : tr("box = influence area"));
             }
 
-            ImGui::SeparatorText(tr("Fields"));
+            form::section(tr("Fields"));
             drawFields(e);
         }
     }
@@ -2611,17 +2716,17 @@ void App::drawInspector() {
 void App::drawEnvironment() {
     if (ImGui::Begin(panelTitle(kIconBrightness, "Environment").c_str())) {
         Environment& env = m_scene.environment;
-        ImGui::SeparatorText(tr("Sun"));
+        form::section(tr("Sun"));
         const Vec3 d = normalize(env.sunDirection);
         f32 azimuth = std::atan2(d.x, d.z) / kDeg, elevation = std::asin(std::clamp(d.y, -1.0f, 1.0f)) / kDeg;
         row(tr("Azimuth"));
-        bool sun = ImGui::SliderFloat("##az", &azimuth, -180.0f, 180.0f, tr("%.1f deg"));
+        bool sun = form::slider("##az", &azimuth, -180.0f, 180.0f, tr("%.1f deg"));
         row(tr("Elevation"));
-        sun |= ImGui::SliderFloat("##el", &elevation, -10.0f, 90.0f, tr("%.1f deg"));
+        sun |= form::slider("##el", &elevation, -10.0f, 90.0f, tr("%.1f deg"));
         if (sun) env.sunDirection = {std::cos(elevation * kDeg) * std::sin(azimuth * kDeg), std::sin(elevation * kDeg), std::cos(elevation * kDeg) * std::cos(azimuth * kDeg)};
         row(tr("Sun color"));
         ImGui::ColorEdit3("##suncolor", &env.sunColor.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
-        ImGui::SeparatorText(tr("Sky and fog (linear)"));
+        form::section(tr("Sky and fog (linear)"));
         row(tr("Sky"));
         ImGui::ColorEdit3("##sky", &env.skyColor.x, ImGuiColorEditFlags_Float);
         row(tr("Ground"));
@@ -2644,7 +2749,7 @@ void App::drawEnvironment() {
             }
             return changed;
         };
-        ImGui::SeparatorText(tr("Sky HDRI"));
+        form::section(tr("Sky HDRI"));
         row(tr("HDRI file"));
         filePicker("##hdri", env.hdri, ".hdr", "textures/");
         if (!env.hdri.empty()) {
@@ -2655,7 +2760,7 @@ void App::drawEnvironment() {
             if (!m_environmentId) ImGui::TextDisabled(tr("Not loaded (see the log): the sky/ground colors are shown."));
             else ImGui::TextDisabled(tr("Baked once into build/cache/environments (the engine reads the same file)."));
         }
-        ImGui::SeparatorText(tr("Reflection probes"));
+        form::section(tr("Reflection probes"));
         u32 probes = 0, baked = 0;
         for (const Entity& e : m_scene.entities)
             if (e.is(kKindProbe)) ++probes, baked += e.field("bake").empty() ? 0u : 1u;
@@ -2667,7 +2772,7 @@ void App::drawEnvironment() {
             ImGui::SameLine();
             ImGui::TextDisabled(tr("%u left"), static_cast<u32>(m_probeQueue.size()));
         }
-        ImGui::SeparatorText(tr("Post-processing"));
+        form::section(tr("Post-processing"));
         const auto boolRow = [&](const char* key, const char* label) {
             bool on = env.postValue(key) != "false";
             row(label);
@@ -2677,7 +2782,7 @@ void App::drawEnvironment() {
             f32 v = 0.0f;
             parseFloat(env.postValue(key), v);
             row(label);
-            if (ImGui::SliderFloat((std::string("##") + key).c_str(), &v, lo, hi, "%.3f")) env.setPost(key, floatText(v));
+            if (form::slider((std::string("##") + key).c_str(), &v, lo, hi, "%.3f")) env.setPost(key, floatText(v));
         };
         boolRow("toneMapping", tr("Tone mapping"));
         boolRow("punchy", tr("Punchy look"));
@@ -2711,7 +2816,7 @@ void App::drawStats() {
         if (s.gpuValid) ImGui::Text(tr("GPU %.2f ms (opaque %.2f, shadow %.2f, post %.2f)"), s.gpuFrameMs, s.gpuPassMs[0], s.gpuPassMs[1], s.gpuPassMs[2]);
         bool vsync = m_renderer->vsync();
         if (checkbox(tr("VSync"), &vsync)) m_renderer->setVsync(vsync);
-        ImGui::SeparatorText(tr("Log"));
+        form::section(tr("Log"));
         if (ImGui::BeginChild("log", {0, 0}, ImGuiChildFlags_Borders)) {
             for (const std::string& w : m_warnings) ImGui::TextColored({1.0f, 0.75f, 0.3f, 1.0f}, "%s", w.c_str());
             for (const std::string& line : m_log) ImGui::TextUnformatted(line.c_str());
@@ -2990,7 +3095,7 @@ constexpr PivotPreset kPivots[9] = {{trn("Top left"), 0.0f, 1.0f},    {trn("Top"
 } // namespace
 
 void App::drawSpriteInspector(Entity& e) {
-    ImGui::SeparatorText(tr("Sprite"));
+    form::section(tr("Sprite"));
     const std::string image = e.field("image");
     row(tr("Image"));
     if (ImGui::BeginCombo("##image", image.empty() ? tr("(none)") : image.c_str(), ImGuiComboFlags_HeightLarge)) {
@@ -3293,11 +3398,11 @@ void App::drawLookDev() {
         row(tr("Turn"));
         checkbox("##turn", &m_lookSpin);
         row(tr("Zoom"));
-        ImGui::SliderFloat("##zoom", &m_lookZoom, 0.5f, 3.0f, "%.2f");
+        form::slider("##zoom", &m_lookZoom, 0.5f, 3.0f, "%.2f");
         row(tr("Flash"));
-        ImGui::SliderFloat("##flash", &m_lookFlash, 0.0f, 1.0f, "%.2f");
+        form::slider("##flash", &m_lookFlash, 0.0f, 1.0f, "%.2f");
         row(tr("Dissolve"));
-        ImGui::SliderFloat("##dissolve", &m_lookDissolve, 0.0f, 1.0f, "%.2f");
+        form::slider("##dissolve", &m_lookDissolve, 0.0f, 1.0f, "%.2f");
 
         std::string model = m_lookModel;
         if (model.empty())

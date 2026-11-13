@@ -21,6 +21,7 @@ struct ModelEntry {
     std::string error;
     std::vector<std::string> warnings;
     u32 triangles = 0, materials = 0, textures = 0;
+    u32 textureSize = 0, bones = 0; // longest texture side (pixels) and joints: the engine's model budget items
     Skeleton skeleton; // skinned model: drawn with a pose of one of its clips
     std::vector<AnimationClip> clips;
     bool skinned() const { return skeleton.valid(); }

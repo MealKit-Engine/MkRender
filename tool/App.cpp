@@ -38,6 +38,16 @@ constexpr const char* kIconRefresh = "\xEE\x9C\xAC"; // U+E72C
 constexpr const char* kIconPlay = "\xEE\x9D\xA8";    // U+E768
 constexpr const char* kIconCamera = "\xEE\x9C\xA2";  // U+E722 capture
 constexpr const char* kIconClear = "\xEE\xA2\x94";   // U+E894
+constexpr const char* kIconOpenFile = "\xEE\xA3\xA5";    // U+E8E5 open a scene file
+constexpr const char* kIconOpenProject = "\xEE\xA2\xB7"; // U+E8B7 Folder: open a project folder
+constexpr const char* kIconCopy = "\xEE\xA3\x88";        // U+E8C8 copy, duplicate
+constexpr const char* kIconDelete = "\xEE\x9D\x8D";      // U+E74D
+constexpr const char* kIconHide = "\xEE\xB4\x9A";        // U+ED1A
+constexpr const char* kIconShow = "\xEE\xA2\x90";        // U+E890
+constexpr const char* kIconLock = "\xEE\x9C\xAE";        // U+E72E
+constexpr const char* kIconUnlock = "\xEE\x9E\x85";      // U+E785
+constexpr const char* kIconUp = "\xEE\x9D\x8A";          // U+E74A move to the top level
+constexpr const char* kIconFrame = "\xEE\x9C\xA1";       // U+E721 Search: frame the selection, find uses
 // Panel tabs (engine docs/TOOL_DESIGN.md section 2 "Panels")
 constexpr const char* kIconTree = "\xEE\xA3\xBD";        // U+E8FD Hierarchy
 constexpr const char* kIconInspector = "\xEE\xA7\xA9";   // U+E9E9
@@ -602,10 +612,10 @@ void App::undo(bool redo) {
     m_eulerFor = 0;
 }
 
-Entity& App::addEntity(const std::string& kind) {
+Entity& App::addEntity(const std::string& kind, const Vec3* at) {
     const KindInfo* info = findKind(kind);
     Entity& e = m_scene.add(kind, info ? info->label : kind);
-    e.position = m_pivot;
+    e.position = at ? *at : m_pivot;
     e.fields = defaultFields(kind);
     if (kind == kKindSpawn) e.color = rgba(255, 220, 90);
     if (kind == kKindProbe || kind == kKindReverb) e.scale = {10, 5, 10};
@@ -1942,6 +1952,8 @@ void App::frame(f64 dt) {
     drawGizmo();
     drawFieldHandles();
     viewportInput();
+    drawViewportMenu();
+    drawEmptyView();
     drawSaveDialog();
     if (!m_status.empty() && m_time - m_statusTime < 4.0) {
         ImGui::SetNextWindowPos({m_uiX + 10.0f, m_uiY + m_uiH - 10.0f}, 0, {0.0f, 1.0f});
@@ -1974,23 +1986,25 @@ void App::layoutDocks(unsigned dockspace) {
 
 // ---------------------------------------------------------------- Menu and dialogs
 
+void App::openSceneDialog() {
+    const std::string where = m_assets.assetsDir().empty() ? std::string() : utf8Of(pathOf(m_assets.assetsDir()) / "scenes");
+    SDL_ShowOpenFileDialog([](void* user, const char* const* files, int) { if (files && files[0]) static_cast<App*>(user)->setPending(files[0]); },
+                           this, static_cast<SDL_Window*>(m_window), kSceneFilters, 2, where.empty() ? nullptr : where.c_str(), false);
+}
+
+void App::openProjectDialog() {
+    SDL_ShowOpenFolderDialog([](void* user, const char* const* files, int) {
+        if (files && files[0]) static_cast<App*>(user)->setPending(std::string("project:") + files[0]);
+    }, this, static_cast<SDL_Window*>(m_window), nullptr, false);
+}
+
 void App::drawMenu() {
     const ImGuiIO& io = ImGui::GetIO();
-    const auto openSceneDialog = [&] {
-        const std::string where = m_assets.assetsDir().empty() ? std::string() : utf8Of(pathOf(m_assets.assetsDir()) / "scenes");
-        SDL_ShowOpenFileDialog([](void* user, const char* const* files, int) { if (files && files[0]) static_cast<App*>(user)->setPending(files[0]); },
-                               this, static_cast<SDL_Window*>(m_window), kSceneFilters, 2, where.empty() ? nullptr : where.c_str(), false);
-    };
-    const auto openProjectDialog = [&] {
-        SDL_ShowOpenFolderDialog([](void* user, const char* const* files, int) {
-            if (files && files[0]) static_cast<App*>(user)->setPending(std::string("project:") + files[0]);
-        }, this, static_cast<SDL_Window*>(m_window), nullptr, false);
-    };
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu(tr("File"))) {
-            if (ImGui::MenuItem(tr("New scene"), "Ctrl+N")) guarded(Pending::NewScene);
-            if (ImGui::MenuItem(tr("Open project..."))) openProjectDialog();
-            if (ImGui::MenuItem(tr("Open scene..."), "Ctrl+O")) openSceneDialog();
+            if (menuItem(kIconAdd, tr("New scene"), "Ctrl+N")) guarded(Pending::NewScene);
+            if (menuItem(kIconOpenProject, tr("Open project..."))) openProjectDialog();
+            if (menuItem(kIconOpenFile, tr("Open scene..."), "Ctrl+O")) openSceneDialog();
             if (ImGui::BeginMenu(tr("Recent scenes"), !m_recent.empty())) {
                 for (const std::string& r : m_recent)
                     if (ImGui::MenuItem(r.c_str(), nullptr, r == m_path)) guarded(Pending::OpenPath, r);
@@ -2047,7 +2061,7 @@ void App::drawMenu() {
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem(tr("Duplicate"), "Ctrl+D", false, m_selected != 0)) duplicateSelected();
-            if (ImGui::MenuItem("Delete", "Del", false, m_selected != 0)) deleteSelected();
+            if (ImGui::MenuItem(tr("Delete"), "Del", false, m_selected != 0)) deleteSelected();
             if (ImGui::MenuItem(tr("Select all"), "Ctrl+A")) {
                 m_selection.clear();
                 for (const Entity& e : m_scene.entities)
@@ -2239,20 +2253,20 @@ void App::drawSaveDialog() {
     ImGui::EndPopup();
 }
 
-void App::drawAddMenu() {
+void App::drawAddMenu(const Vec3* at) {
     bool anyGame = false;
     for (const KindInfo& k : kinds()) {
         if (k.game) {
             anyGame = true;
             continue;
         }
-        if (ImGui::MenuItem(k.label.c_str())) addEntity(k.name);
+        if (ImGui::MenuItem(k.label.c_str())) addEntity(k.name, at);
     }
     if (!anyGame) return;
     ImGui::Separator();
     ImGui::TextDisabled(tr("Game"));
     for (const KindInfo& k : kinds())
-        if (k.game && ImGui::MenuItem(k.label.c_str())) addEntity(k.name);
+        if (k.game && ImGui::MenuItem(k.label.c_str())) addEntity(k.name, at);
 }
 
 // ---------------------------------------------------------------- Hierarchy
@@ -2305,13 +2319,13 @@ void App::drawTreeNode(const Entity& e) {
     if (ImGui::BeginPopupContextItem("ctx")) {
         if (!isSelected(e.id)) clickSelect(e.id, false);
         const bool hidden = m_hidden.count(e.id) != 0, locked = m_locked.count(e.id) != 0;
-        if (ImGui::MenuItem(hidden ? tr("Show") : tr("Hide"), "H")) setHidden(m_selection, !hidden);
-        if (ImGui::MenuItem(locked ? tr("Unlock") : tr("Lock (not picked in the view)"))) setLocked(m_selection, !locked);
+        if (menuItem(hidden ? kIconShow : kIconHide, hidden ? tr("Show") : tr("Hide"), "H")) setHidden(m_selection, !hidden);
+        if (menuItem(locked ? kIconUnlock : kIconLock, locked ? tr("Unlock") : tr("Lock (not picked in the view)"))) setLocked(m_selection, !locked);
         ImGui::Separator();
-        if (ImGui::MenuItem(tr("Duplicate"), "Ctrl+D")) duplicateSelected();
-        if (ImGui::MenuItem("Delete", "Del")) deleteSelected();
-        if (e.parent && ImGui::MenuItem(tr("Move to top level"))) reparent(e.id, 0);
-        if (ImGui::MenuItem(tr("Frame"), "F")) frameSelected();
+        if (menuItem(kIconCopy, tr("Duplicate"), "Ctrl+D")) duplicateSelected();
+        if (menuItem(kIconDelete, tr("Delete"), "Del")) deleteSelected();
+        if (e.parent && menuItem(kIconUp, tr("Move to top level"))) reparent(e.id, 0);
+        if (menuItem(kIconFrame, tr("Frame"), "F")) frameSelected();
         ImGui::EndPopup();
     }
     const u32 id = e.id; // e may move when the list changes below
@@ -2337,6 +2351,59 @@ bool App::iconButton(const char* glyph, const char* name, const char* detail) {
         else if (iconFont) ImGui::SetTooltip("%s", name);
     }
     return pressed;
+}
+
+bool App::actionButton(const char* glyph, const char* label, bool primary) {
+    // Pills like the Manager's actionButton (Spectrum 2) in Body Strong; only the empty state's main action is accent-filled
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, ImGui::GetFrameHeight() * 0.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {ImGui::GetStyle().FramePadding.x * 2.0f, ImGui::GetStyle().FramePadding.y});
+    if (primary) {
+        ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccentDown);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+    }
+    if (strongFont) ImGui::PushFont(static_cast<ImFont*>(strongFont), 0.0f);
+    const std::string text = (iconFont ? std::string(glyph) + "  " : std::string()) + label + "##" + label;
+    const bool pressed = ImGui::Button(text.c_str());
+    if (strongFont) ImGui::PopFont();
+    if (primary) ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+    return pressed;
+}
+
+bool App::menuItem(const char* glyph, const char* name, const char* shortcut, bool selected, bool enabled) {
+    const std::string text = (iconFont ? std::string(glyph) + "  " : std::string()) + name;
+    return ImGui::MenuItem(text.c_str(), shortcut, selected, enabled);
+}
+
+bool App::beginIconMenu(const char* glyph, const char* name, bool enabled) {
+    return ImGui::BeginMenu((iconFont ? std::string(glyph) + "  " + name : std::string(name)).c_str(), enabled);
+}
+
+void App::emptyState(const char* sentence, const std::function<void()>& buttons) {
+    // ImGui has no layout pass: the button row's width from the last frame centres it (per window, the first frame is off by a bit)
+    static std::map<ImGuiID, f32> rowWidths;
+    const ImGuiID key = ImGui::GetID("##emptystate");
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const ImVec2 start = ImGui::GetCursorPos();
+    ImGui::PushFont(nullptr, 18.0f); // Body Large (TOOL_DESIGN 3.1), before the DPI scale
+    const f32 wrap = std::min(avail.x, ImGui::GetFontSize() * 24.0f);
+    const ImVec2 textSize = ImGui::CalcTextSize(sentence, nullptr, false, wrap);
+    const auto known = rowWidths.find(key);
+    const f32 rowWidth = known != rowWidths.end() ? known->second : 0.0f;
+    const f32 height = textSize.y + ImGui::GetStyle().ItemSpacing.y * 3.0f + ImGui::GetFrameHeight();
+    ImGui::SetCursorPos({start.x + std::max(0.0f, (avail.x - textSize.x) * 0.5f), start.y + std::max(0.0f, (avail.y - height) * 0.5f)});
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+    ImGui::TextUnformatted(sentence);
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    ImGui::Dummy({0.0f, ImGui::GetStyle().ItemSpacing.y * 2.0f});
+    ImGui::SetCursorPosX(start.x + std::max(0.0f, (avail.x - rowWidth) * 0.5f));
+    ImGui::BeginGroup();
+    buttons();
+    ImGui::EndGroup();
+    rowWidths[key] = ImGui::GetItemRectSize().x;
 }
 
 namespace {
@@ -2480,10 +2547,30 @@ void App::drawHierarchy() {
                 for (size_t i = 0; i < m_scene.entities.size(); ++i)
                     if (!m_scene.entities[i].parent && m_scene.entities[i].folder.empty()) drawTreeNode(m_scene.entities[i]);
             }
-            // Empty space: drop to move to the top level, click to clear the selection
+            if (m_scene.entities.empty()) {
+                const ImVec2 at = ImGui::GetCursorPos();
+                emptyState(tr("No objects in this scene yet."), [&] {
+                    if (actionButton(kIconAdd, tr("Add object"))) ImGui::OpenPopup("addEmpty");
+                    if (ImGui::BeginPopup("addEmpty")) {
+                        drawAddMenu();
+                        ImGui::EndPopup();
+                    }
+                });
+                ImGui::SetCursorPos(at); // the empty space below still covers the panel (drops, right click)
+                ImGui::SetNextItemAllowOverlap();
+            }
+            // Empty space: drop to move to the top level, click to clear the selection, right-click to add
             const ImVec2 avail = ImGui::GetContentRegionAvail();
             ImGui::InvisibleButton("##empty", {std::max(1.0f, avail.x), std::max(ImGui::GetFrameHeight(), avail.y)});
             if (ImGui::IsItemClicked()) m_selected = 0;
+            if (ImGui::BeginPopupContextItem("emptyctx")) {
+                if (beginIconMenu(kIconAdd, tr("Add object"))) {
+                    drawAddMenu();
+                    ImGui::EndMenu();
+                }
+                if (menuItem(kIconFrame, tr("Frame selection"), "F", false, m_selected != 0)) frameSelected();
+                ImGui::EndPopup();
+            }
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(kDragEntity)) {
                     const u32 id = *static_cast<const u32*>(p->Data);
@@ -2768,6 +2855,10 @@ void App::drawEnvironment() {
         ImGui::BeginDisabled(probes == 0 || bakingProbes() || m_project.empty());
         if (ImGui::Button(tr("Bake probes"))) bakeProbes();
         ImGui::EndDisabled();
+        if (ImGui::BeginPopupContextItem("bakectx")) {
+            environmentMenuItems();
+            ImGui::EndPopup();
+        }
         if (bakingProbes()) {
             ImGui::SameLine();
             ImGui::TextDisabled(tr("%u left"), static_cast<u32>(m_probeQueue.size()));
@@ -2805,8 +2896,24 @@ void App::drawEnvironment() {
         ImGui::EndDisabled();
         // One literal: the translation table and its test match whole strings
         ImGui::SetItemTooltip("%s", tr("Saves the view without the LUT to art/grading/<scene>.png with a neutral.cube beside it:\ngrade both in Resolve or Photoshop, export a .cube into assets/lut and pick it here."));
+        if (ImGui::BeginPopupContextItem("gradingctx")) {
+            environmentMenuItems();
+            ImGui::EndPopup();
+        }
+        // The panel's actions on a right click anywhere that isn't a field (TOOL_DESIGN section 1 "second way in")
+        if (ImGui::BeginPopupContextWindow("envctx", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+            environmentMenuItems();
+            ImGui::EndPopup();
+        }
     }
     ImGui::End();
+}
+
+void App::environmentMenuItems() {
+    u32 probes = 0;
+    for (const Entity& e : m_scene.entities) probes += e.is(kKindProbe) ? 1u : 0u;
+    if (menuItem(kIconRefresh, tr("Bake probes"), nullptr, false, probes > 0 && !bakingProbes() && !m_project.empty())) bakeProbes();
+    if (menuItem(kIconCamera, tr("Grading capture"), nullptr, false, !m_project.empty())) requestGradingCapture();
 }
 
 void App::drawStats() {
@@ -2952,6 +3059,67 @@ void App::drawOverlay() {
     dl->PopClipRect();
 }
 
+void App::drawViewportMenu() {
+    if (!ImGui::BeginPopup("##viewctx")) return;
+    if (beginIconMenu(kIconAdd, tr("Add here"))) {
+        drawAddMenu(&m_menuPoint);
+        ImGui::EndMenu();
+    }
+    const bool any = m_selected != 0;
+    ImGui::Separator();
+    if (menuItem(kIconFrame, tr("Frame selection"), "F", false, any)) frameSelected();
+    if (menuItem(kIconCopy, tr("Duplicate"), "Ctrl+D", false, any)) duplicateSelected();
+    if (menuItem(kIconDelete, tr("Delete"), "Del", false, any)) deleteSelected();
+    if (menuItem(kIconHide, tr("Hide"), "H", false, any)) setHidden(m_selection, true);
+    if (ImGui::MenuItem(tr("Drop to floor"), "End", false, any)) dropToFloor();
+    ImGui::Separator();
+    if (beginIconMenu(kIconView, tr("View Mode"))) {
+        viewModeItems();
+        ImGui::EndMenu();
+    }
+    if (ImGui::MenuItem(tr("Grid"), "G", &m_showGrid)) savePrefs();
+    if (ImGui::MenuItem(tr("Markers and areas"), nullptr, &m_showMarkers)) savePrefs();
+    ImGui::EndPopup();
+}
+
+void App::drawEmptyView() {
+    if (!m_scene.entities.empty() || m_shot || m_uiW < 240.0f || m_uiH < 160.0f) return;
+    // A window without a background in the middle of the view, sized to the sentence and buttons, so the view still takes the
+    // mouse around it (orbit, right-click menu, drops)
+    const bool firstScreen = m_path.empty();
+    const char* sentence = firstScreen ? tr("Open a scene to edit it, or add an object to start a new one.")
+                                       : tr("This scene has no objects yet. Add one, or drag a model in from Assets.");
+    ImGui::SetNextWindowPos({m_uiX + m_uiW * 0.5f, m_uiY + m_uiH * 0.5f}, ImGuiCond_Always, {0.5f, 0.5f});
+    ImGui::PushFont(nullptr, 18.0f);
+    const f32 width = std::min(ImGui::CalcTextSize(sentence).x, ImGui::GetFontSize() * 24.0f);
+    ImGui::PopFont();
+    ImGui::SetNextWindowContentSize({width, 0.0f});
+    // On the view mode pill's dark glass: a light sky behind white text is unreadable
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.09f, 0.82f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {ImGui::GetFontSize() * 1.5f, ImGui::GetFontSize() * 1.25f});
+    ImGui::Begin("##emptyView", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking |
+                                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings |
+                                             ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    emptyState(sentence, [&] {
+        if (firstScreen) {
+            if (actionButton(kIconOpenFile, tr("Open Scene"), true)) openSceneDialog();
+            ImGui::SameLine();
+        }
+        if (actionButton(kIconAdd, tr("Add object"), !firstScreen)) ImGui::OpenPopup("addView");
+        if (ImGui::BeginPopup("addView")) {
+            drawAddMenu();
+            ImGui::EndPopup();
+        }
+        if (m_project.empty()) {
+            ImGui::SameLine();
+            if (actionButton(kIconOpenProject, tr("Open project"))) openProjectDialog();
+        }
+    });
+    ImGui::End();
+}
+
 void App::drawGizmo() {
     m_gizmoUsing = false;
     Entity* e = m_scene.find(m_selected);
@@ -3030,6 +3198,24 @@ void App::viewportInput() {
         } else if (std::hypot(mouse.x - m_clickX, mouse.y - m_clickY) < 5.0f && !io.KeyAlt) {
             clickSelect(pick(mouse.x, mouse.y), toggle);
         }
+    }
+    // A right click without orbiting or flying opens the view's menu (drawViewportMenu)
+    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !m_gizmoUsing && !m_handleUsing) {
+        m_rightCandidate = true;
+        m_rightX = mouse.x;
+        m_rightY = mouse.y;
+    }
+    if (m_rightCandidate && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        const bool flying = !io.WantTextInput && (ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_A) || ImGui::IsKeyDown(ImGuiKey_S) ||
+                                                  ImGui::IsKeyDown(ImGuiKey_D) || ImGui::IsKeyDown(ImGuiKey_Q) || ImGui::IsKeyDown(ImGuiKey_E));
+        if (flying || std::hypot(mouse.x - m_rightX, mouse.y - m_rightY) >= 5.0f) m_rightCandidate = false;
+    }
+    if (m_rightCandidate && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        m_rightCandidate = false;
+        const u32 hit = pick(mouse.x, mouse.y);
+        if (hit && !isSelected(hit)) clickSelect(hit, false);
+        if (!groundPoint(mouse.x, mouse.y, m_menuPoint)) m_menuPoint = m_pivot;
+        ImGui::OpenPopup("##viewctx");
     }
     // Assets dragged from the Assets window and released over the view
     if (const ImGuiPayload* payload = ImGui::GetDragDropPayload(); payload && payload->IsDataType(kDragAsset) && inside &&
@@ -3589,9 +3775,23 @@ void App::drawAssets() {
     }
     if (ImGui::Begin(panelTitle(kIconFolder, "Assets").c_str())) {
         if (m_assets.assetsDir().empty()) {
-            ImGui::TextDisabled(tr("Open a project to see its assets."));
+            emptyState(tr("Open a project to see its assets."), [&] {
+                if (actionButton(kIconOpenProject, tr("Open project"), true)) openProjectDialog();
+            });
         } else {
+            const auto panelItems = [&] {
+                if (menuItem(kIconRefresh, tr("Rescan"))) m_assets.rescan();
+                if (ImGui::MenuItem(tr("Pictures"), nullptr, &m_showThumbs)) savePrefs();
+            };
             if (iconButton(kIconRefresh, tr("Rescan"))) m_assets.rescan();
+            if (ImGui::BeginPopupContextItem("rescanctx")) {
+                panelItems();
+                ImGui::EndPopup();
+            }
+            if (ImGui::BeginPopupContextWindow("assetspanelctx", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+                panelItems();
+                ImGui::EndPopup();
+            }
             ImGui::SameLine();
             if (checkbox(tr("Pictures"), &m_showThumbs)) savePrefs();
             ImGui::SameLine();
@@ -3640,9 +3840,9 @@ void App::drawAssets() {
                                 ImGui::EndDragDropSource();
                             }
                             if (ImGui::BeginPopupContextItem("assetctx")) {
-                                if (ImGui::MenuItem(tr("Place at the view center"))) placeAsset(f, m_pivot);
-                                if (ImGui::MenuItem(tr("Find uses in this scene"))) findUses(f);
-                                if (ImGui::MenuItem(tr("Copy path"))) ImGui::SetClipboardText(f.c_str());
+                                if (menuItem(kIconAdd, tr("Place at the view center"))) placeAsset(f, m_pivot);
+                                if (menuItem(kIconFrame, tr("Find uses in this scene"))) findUses(f);
+                                if (menuItem(kIconCopy, tr("Copy path"))) ImGui::SetClipboardText(f.c_str());
                                 ImGui::EndPopup();
                             }
                             ImGui::PopID();

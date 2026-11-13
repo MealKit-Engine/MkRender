@@ -7,11 +7,8 @@ Sources: engine `docs/ROADMAP.md` "Scene editing in MkRender, leftovers", "MkRen
 
 ## 1. Suite look (engine TOOL_DESIGN section 6 checklist)
 
-MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title bar, the app icon, outlined checkboxes and panel tab icons (engine CHANGELOG "Design refresh ... part 6"). Left:
+MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title bar, the app icon, outlined checkboxes, panel tab icons, right-click items for its icon actions and the empty states (engine CHANGELOG "Design refresh ... part 6" and "part 8"). Left:
 
-- [ ] **Brush radio buttons in a capture**: the terrain and scatter brush radio buttons use `radioButton` but haven't been seen on screen yet.
-- [ ] **A right-click item for each icon action** (TOOL_DESIGN 1 "second way in"): hierarchy rows, viewport toolbar, Environment and Assets buttons.
-- [ ] **First screen and empty states** to icon + label buttons with one primary button (`Open Scene`), the empty-state sentence in Body Large (TOOL_DESIGN 1, 4).
 - [ ] Section 6 item 7: a screenshot beside the editor at the same DPI, then update the MkRender row of TOOL_DESIGN section 7.
 
 ## 2. Sprites, later

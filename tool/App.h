@@ -12,6 +12,7 @@
 #include <deque>
 #include <map>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -67,6 +68,7 @@ public:
     void setShot(Vec3 eye, f32 yawDegrees, f32 pitchDegrees);
     bool shotMode() const { return m_shot; } // --window <name>: brings that docked window to the front (captures for docs and checks) // --editor-play: play once an editor is found
     bool iconFont = false; // the Segoe icon font merged into the UI font (main.cpp loadFont)
+    void* strongFont = nullptr; // ImFont* of Segoe UI Semibold (Body Strong: buttons of empty states), nullptr: the regular font
 
 private:
     // Flat square icon button with its name in the tooltip (engine docs/TOOL_DESIGN.md section 1); the name as the label without the icon font
@@ -74,6 +76,14 @@ private:
     // Panel tab title "glyph  Name###Name" (engine docs/TOOL_DESIGN.md section 1 "Panel tabs"): the id after ### stays the same with or
     // without the icon font, so the saved dock layout and --window <Name> keep working
     std::string panelTitle(const char* glyph, const char* name) const;
+    // Icon + label button of an empty state (TOOL_DESIGN section 1 "occasional screens"); primary = the one accent-filled button
+    bool actionButton(const char* glyph, const char* label, bool primary = false);
+    // Menu item "glyph  Name" (TOOL_DESIGN section 1: menu items show an icon and the name); the name alone without the icon font
+    bool menuItem(const char* glyph, const char* name, const char* shortcut = nullptr, bool selected = false, bool enabled = true);
+    bool beginIconMenu(const char* glyph, const char* name, bool enabled = true); // submenu "glyph  Name"
+    // An empty state in the middle of the space left in the current window (TOOL_DESIGN section 4): one sentence in Body Large,
+    // then the row of buttons drawn by buttons()
+    void emptyState(const char* sentence, const std::function<void()>& buttons);
     enum class Pending { None, Quit, OpenPath, NewScene };
     enum class Gizmo { Translate, Rotate, Scale };
 
@@ -94,7 +104,7 @@ private:
     // Editing
     void snapshot();
     void undo(bool redo);
-    Entity& addEntity(const std::string& kind);
+    Entity& addEntity(const std::string& kind, const Vec3* at = nullptr);
     void duplicateSelected();
     void deleteSelected();
     // Selection: m_selected is the primary object (inspector, gizmo), m_selection all selected ones including it
@@ -143,7 +153,12 @@ private:
     void drawGizmo();
     void viewportInput();
     void drawSaveDialog();
-    void drawAddMenu();
+    void drawAddMenu(const Vec3* at = nullptr); // at: where the new object goes (the view centre without it)
+    void openSceneDialog();
+    void openProjectDialog();
+    void drawEmptyView(); // the viewport's empty state: no objects in the scene (first screen: no scene file either)
+    void drawViewportMenu(); // right-click menu of the view (a right click without dragging)
+    void environmentMenuItems();
 
     // View
     Vec3 cameraForward() const;
@@ -268,6 +283,9 @@ private:
     char m_prefabName[64] = {};
     bool m_prefabPopup = false;
     bool m_clickCandidate = false;
+    bool m_rightCandidate = false; // right button went down in the view: a menu when released without orbiting or flying
+    f32 m_rightX = 0, m_rightY = 0;
+    Vec3 m_menuPoint{}; // ground point under the right click (Add here)
     f32 m_clickX = 0, m_clickY = 0;
 
     LightingModel m_lighting = LightingModel::Pbr;

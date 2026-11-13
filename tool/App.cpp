@@ -25,6 +25,8 @@ namespace {
 constexpr f32 kPi = 3.14159265358979f;
 constexpr f32 kDeg = kPi / 180.0f;
 constexpr u32 kThumbSize = 96; // asset thumbnails (pixels)
+constexpr u32 kSheetSize = 256; // sprite slicer picture (pixels)
+constexpr u32 kLookSize = 768;  // Look Dev image (pixels, square)
 constexpr const char* kDragEntity = "MKR_ENTITY";
 constexpr const char* kDragAsset = "MKR_ASSET";
 // Glyphs from engine docs/TOOL_DESIGN.md section 2 (Segoe Fluent Icons / MDL2 Assets)
@@ -41,6 +43,27 @@ constexpr const char* kIconFolder = "\xEE\xA2\xB7";      // U+E8B7 Assets
 constexpr const char* kIconBrightness = "\xEE\x9C\x86";  // U+E706 Environment
 constexpr const char* kIconPerformance = "\xEE\xA7\x99"; // U+E9D9 Stats
 constexpr const char* kIconLanguage = "\xEF\x8A\xB7";    // U+F2B7 LocaleLanguage
+constexpr const char* kIconLookDev = "\xEE\x9F\xB4";     // U+E7F4 Look Dev (the editor's Preview)
+// Hierarchy kind icons (module-editor ImGuiLayer.h icon::, the editor's scene tree)
+constexpr const char* kIconBox = "\xEE\x9C\xB9";    // U+E739 solid, decoration
+constexpr const char* kIconModel = "\xEE\x9E\xB8";  // U+E7B8 an object with a model
+constexpr const char* kIconPin = "\xEE\x9C\x87";    // U+E707 spawn and other markers
+constexpr const char* kIconArea = "\xEE\xA0\x8A";   // U+E80A volumes
+constexpr const char* kIconLight = "\xEE\xAA\x80";  // U+EA80 point light
+constexpr const char* kIconProbe = "\xEE\xA4\x89";  // U+E909 reflection probe
+constexpr const char* kIconFlag = "\xEE\x9F\x81";   // U+E7C1 other game kinds
+constexpr const char* kIconImage = "\xEE\xA4\x9B";  // U+E91B Photo: sprite
+
+// Orthographic projection with reversed z like perspectiveReversedZ (the engine's orthographicReversedZ): near maps to 1, far to 0
+Mat4 orthographicReversedZ(f32 halfHeight, f32 aspect, f32 zNear, f32 zFar) {
+    Mat4 r;
+    r.m[0][0] = 1.0f / (halfHeight * aspect);
+    r.m[1][1] = 1.0f / halfHeight;
+    r.m[2][2] = -1.0f / (zFar - zNear);
+    r.m[3][2] = zFar / (zFar - zNear);
+    r.m[3][3] = 1.0f;
+    return r;
+}
 
 // Checkbox and radio colors (engine docs/TOOL_DESIGN.md 3.1, 3.2): a gray 4 box on a gray 2 panel is about 1.25:1, so an unchecked
 // box gets a gray 9 outline (gray 11 hovered) and a checked one the accent fill with a gray 12 mark
@@ -300,7 +323,13 @@ bool App::openProject(const std::string& dir) {
     reloadKinds();
     const std::string model = projectSetting("lightingModel");
     setLightingModel(model == "Toon" ? LightingModel::Toon : model == "Unlit" ? LightingModel::Unlit : LightingModel::Pbr);
-    log("Project " + m_project);
+    m_view2d = projectSetting("view2d") == "true";
+    if (m_view2d) { // face the XY plane around the origin
+        m_yaw = m_pitch = 0.0f;
+        m_pivot = {0.0f, 0.0f, 0.0f};
+        m_distance = 12.0f;
+    }
+    log("Project " + m_project + (m_view2d ? " (2D)" : ""));
     const std::string main = projectSetting("scene");
     if (!main.empty()) return loadScenePath(m_assets.resolve(main));
     const std::vector<std::string> scenes = m_assets.files(".scene");
@@ -913,6 +942,7 @@ Vec3 App::cameraForward() const { return {std::cos(m_pitch) * std::sin(m_yaw), -
 Vec3 App::cameraEye() const { return m_pivot - cameraForward() * m_distance; }
 Mat4 App::viewMatrix() const { return lookAtLH(cameraEye(), m_pivot, {0, 1, 0}); }
 Mat4 App::projMatrix() const {
+    if (m_view2d) return orthographicReversedZ(orthoHalfHeight(), std::max(1.0f, m_view.width) / std::max(1.0f, m_view.height), -4000.0f, 4000.0f);
     return perspectiveReversedZ(m_fov * kDeg, std::max(1.0f, m_view.width) / std::max(1.0f, m_view.height), 0.05f, 4000.0f);
 }
 
@@ -967,6 +997,12 @@ void App::mouseRay(f32 mx, f32 my, Vec3& eye, Vec3& dir) const {
     const Vec3 forward = cameraForward();
     const Vec3 right = normalize(cross({0, 1, 0}, forward));
     const Vec3 up = cross(forward, right);
+    if (m_view2d) { // parallel rays from the view plane
+        const f32 h = orthoHalfHeight();
+        eye = cameraEye() + right * (nx * h * m_uiW / m_uiH) + up * (ny * h) - forward * 4000.0f;
+        dir = forward;
+        return;
+    }
     const f32 t = std::tan(m_fov * kDeg * 0.5f);
     dir = normalize(forward + right * (nx * t * m_uiW / m_uiH) + up * (ny * t));
     eye = cameraEye();
@@ -1029,7 +1065,11 @@ bool App::groundPoint(f32 mx, f32 my, Vec3& out) {
         out = eye + dir * dist;
         return true;
     }
-    if (dir.y < -1e-4f) {
+    if (m_view2d && std::fabs(dir.z) > 1e-4f) { // 2D: the z = 0 plane
+        out = eye + dir * (-eye.z / dir.z);
+        return true;
+    }
+    if (!m_view2d && dir.y < -1e-4f) {
         out = eye + dir * (-eye.y / dir.y);
         return true;
     }
@@ -1515,6 +1555,16 @@ void App::renderOffscreen() {
         }
         m_thumbNext.clear();
     }
+    if (m_sheetPending) {
+        if (!m_sheetTarget) m_sheetTarget = r.createRenderTarget(kSheetSize, kSheetSize);
+        if (m_sheetTarget) r.drawToTarget(m_sheetTarget, m_sheetFrame, m_sheetList, LightingModel::Unlit);
+        m_sheetPending = false;
+    }
+    if (m_lookPending) {
+        if (!m_lookTarget) m_lookTarget = r.createRenderTarget(kLookSize, kLookSize);
+        if (m_lookTarget) r.drawToTarget(m_lookTarget, m_lookFrame, m_lookList, m_lookDrawLighting);
+        m_lookPending = false;
+    }
     if (!m_probeQueue.empty() && m_bakeListReady) {
         const Entity* e = m_scene.find(m_probeQueue.front());
         if (!e) {
@@ -1586,6 +1636,8 @@ void App::fill(DrawList& list) {
     }
     addScene(list);
     if (m_showThumbs) prepareThumbnail();
+    prepareSheet();
+    prepareLookDev(m_lastDt);
     // Probe faces and the grading capture draw the scene without selection highlight
     m_bakeListReady = false;
     const bool grade = m_gradeRequested && m_time > 0.25; // after the first frames, when the dock layout gives the view its size
@@ -1815,6 +1867,8 @@ void App::afterFrame() { m_hideUiThisFrame = false; }
 
 void App::frame(f64 dt) {
     m_time += dt;
+    m_lastDt = dt;
+    if (m_view2d) m_yaw = m_pitch = 0.0f;
     m_fps = m_fps <= 0.0f ? 60.0f : m_fps * 0.95f + 0.05f / static_cast<f32>(std::max(dt, 1e-4));
     ImGuizmo::BeginFrame();
     syncSelection();
@@ -1854,9 +1908,11 @@ void App::frame(f64 dt) {
     }
     drawInspector();
     drawEnvironment();
+    drawLookDev();
     drawStats();
     drawOverlay();
     drawGizmo();
+    drawFieldHandles();
     viewportInput();
     drawSaveDialog();
     if (!m_status.empty() && m_time - m_statusTime < 4.0) {
@@ -1884,6 +1940,7 @@ void App::layoutDocks(unsigned dockspace) {
     ImGui::DockBuilderDockWindow("###Assets", leftBottom);
     ImGui::DockBuilderDockWindow("###Inspector", right);
     ImGui::DockBuilderDockWindow("###Environment", right);
+    ImGui::DockBuilderDockWindow("###Look Dev", right);
     ImGui::DockBuilderFinish(dockspace);
 }
 
@@ -2176,11 +2233,28 @@ void App::drawTreeNode(const Entity& e) {
     // Keep the selection visible: open the ancestors of the selected object
     if (hasChildren && m_selected && m_selected != e.id && isDescendant(m_scene, m_selected, e.id)) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     ImGui::PushID(static_cast<int>(e.id));
-    const bool open = ImGui::TreeNodeEx("##node", flags, "%s", e.name.empty() ? "(unnamed)" : e.name.c_str());
+    // Room for the kind icon before the name, drawn in the object's color (the editor's scene tree)
+    const char* glyph = iconFont ? entityIcon(e) : nullptr;
+    const bool open = ImGui::TreeNodeEx("##node", flags, glyph ? "      %s" : "%s", e.name.empty() ? "(unnamed)" : e.name.c_str());
+    if (glyph) {
+        f32 c[4];
+        colorToFloats(e.color, c);
+        if (c[0] * 0.3f + c[1] * 0.59f + c[2] * 0.11f < 0.25f) c[0] = c[1] = c[2] = 0.8f; // dark objects: a readable icon
+        const ImVec2 rowMin = ImGui::GetItemRectMin();
+        ImGui::GetWindowDrawList()->AddText({rowMin.x + ImGui::GetTreeNodeToLabelSpacing(), rowMin.y}, ImGui::ColorConvertFloat4ToU32({c[0], c[1], c[2], 1.0f}), glyph);
+    }
+    const bool rowHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort);
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) clickSelect(e.id, ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl);
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         m_selected = e.id;
         frameSelected();
+    }
+    // "!" after the name: a problem (red) or a warning (orange), the text on hover of the row or the mark
+    if (const auto badge = m_badges.find(e.id); badge != m_badges.end()) {
+        if (rowHovered) ImGui::SetTooltip("%s", badge->second.text.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(badge->second.error ? ImVec4(1.0f, 0.42f, 0.38f, 1.0f) : ImVec4(1.0f, 0.68f, 0.25f, 1.0f), "!");
+        ImGui::SetItemTooltip("%s", badge->second.text.c_str());
     }
     ImGui::SameLine();
     const KindInfo* kindInfo = findKind(e.kind);
@@ -2258,6 +2332,7 @@ std::string App::panelTitle(const char* glyph, const char* name) const {
 
 void App::drawHierarchy() {
     if (ImGui::Begin(panelTitle(kIconTree, "Hierarchy").c_str())) {
+        updateBadges();
         if (iconButton(kIconAdd, tr("Add object"))) ImGui::OpenPopup("add");
         if (ImGui::BeginPopup("add")) {
             drawAddMenu();
@@ -2500,6 +2575,7 @@ void App::drawInspector() {
             row(tr("Checker"));
             if (checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
             if (e.is(kKindScatter) || e.is(kKindTerrain)) drawBrushInspector(e);
+            if (e.is(kKindSprite)) drawSpriteInspector(e);
             if (!e.model.empty()) {
                 const ModelEntry& m = m_assets.model(e.model);
                 if (m.ok && m.skinned()) {
@@ -2667,7 +2743,9 @@ void App::drawOverlay() {
     if (m_showGrid) { // lines on y = 0 around the pivot, every grid step, brighter every 10
         const f32 step = std::max(m_gridStep, 0.01f) * (m_distance > 400.0f * m_gridStep ? 10.0f : 1.0f);
         const int half = 40;
-        const f32 cx = std::round(m_pivot.x / step) * step, cz = std::round(m_pivot.z / step) * step;
+        // 3D: the y = 0 floor; 2D: the z = 0 plane the game plays on (second coordinate is y)
+        const f32 cx = std::round(m_pivot.x / step) * step, cz = std::round((m_view2d ? m_pivot.y : m_pivot.z) / step) * step;
+        const auto at = [&](f32 u, f32 v) { return m_view2d ? Vec3{u, v, 0.0f} : Vec3{u, 0.0f, v}; };
         for (int i = -half; i <= half; ++i) {
             const f32 o = static_cast<f32>(i) * step;
             for (int axis = 0; axis < 2; ++axis) {
@@ -2676,8 +2754,8 @@ void App::drawOverlay() {
                 const int segments = 8;
                 for (int s = 0; s < segments; ++s) {
                     const f32 t0 = -half * step + 2.0f * half * step * s / segments, t1 = -half * step + 2.0f * half * step * (s + 1) / segments;
-                    const Vec3 a = axis ? Vec3{cx + o, 0, cz + t0} : Vec3{cx + t0, 0, cz + o};
-                    const Vec3 b = axis ? Vec3{cx + o, 0, cz + t1} : Vec3{cx + t1, 0, cz + o};
+                    const Vec3 a = axis ? at(cx + o, cz + t0) : at(cx + t0, cz + o);
+                    const Vec3 b = axis ? at(cx + o, cz + t1) : at(cx + t1, cz + o);
                     f32 ax, ay, bx, by;
                     if (project(a, ax, ay) && project(b, bx, by)) dl->AddLine({ax, ay}, {bx, by}, c, 1.0f);
                 }
@@ -2727,7 +2805,7 @@ void App::drawOverlay() {
                 parseColorText(e.field("color"), c);
                 color = IM_COL32(c[0], c[1], c[2], 240);
                 glyph = "L";
-                if (selected) { // range circle on the ground plane of the light
+                if (selected && !findKindField(e.kind, "range")) { // range circle on the ground plane (with a kinds file: the range handle)
                     f32 range = 6.0f;
                     parseFloat(e.field("range"), range);
                     ImVec2 prev{};
@@ -2773,7 +2851,7 @@ void App::drawGizmo() {
     m_gizmoUsing = false;
     Entity* e = m_scene.find(m_selected);
     if (!e || m_uiW < 2.0f || e->is(kKindScatter) || brushActive()) return;
-    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetOrthographic(m_view2d);
     ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
     ImGuizmo::SetRect(m_uiX, m_uiY, m_uiW, m_uiH);
     ImGuizmo::SetGizmoSizeClipSpace(0.13f);
@@ -2782,6 +2860,8 @@ void App::drawGizmo() {
     compose(before, matrix);
     ImGuizmo::OPERATION op = m_gizmo == Gizmo::Translate ? ImGuizmo::TRANSLATE : m_gizmo == Gizmo::Rotate ? ImGuizmo::ROTATE : ImGuizmo::SCALE;
     if (isMarker(*e) && op == ImGuizmo::SCALE) op = ImGuizmo::TRANSLATE;
+    if (m_view2d && op == ImGuizmo::ROTATE) op = ImGuizmo::ROTATE_Z; // 2D: turning on the plane only
+    if (m_view2d && op == ImGuizmo::TRANSLATE) op = static_cast<ImGuizmo::OPERATION>(ImGuizmo::TRANSLATE_X | ImGuizmo::TRANSLATE_Y);
     const ImGuizmo::MODE mode = (m_gizmoLocal || op == ImGuizmo::SCALE) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
     const f32 step = op == ImGuizmo::TRANSLATE ? m_snapMove : op == ImGuizmo::ROTATE ? m_snapRotate : m_snapScale;
     const f32 snap[3] = {step, step, step};
@@ -2823,7 +2903,7 @@ void App::viewportInput() {
     const bool inside = mouse.x >= m_uiX && mouse.y >= m_uiY && mouse.x < m_uiX + m_uiW && mouse.y < m_uiY + m_uiH;
     const bool free = inside && !io.WantCaptureMouse;
     const bool brushing = brushInput(free) || m_brushStroke;
-    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing && !brushing && !(io.KeyAlt && brushActive())) {
+    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing && !m_handleUsing && !brushing && !(io.KeyAlt && brushActive())) {
         m_clickCandidate = true;
         m_clickX = mouse.x;
         m_clickY = mouse.y;
@@ -2863,7 +2943,10 @@ void App::viewportInput() {
                                    ImGui::IsMouseClicked(ImGuiMouseButton_Left)))
         dragging = true;
     if (!orbit && !pan) dragging = false;
-    if (dragging && orbit) {
+    if (dragging && orbit && m_view2d) { // 2D: no turning, a right drag pans
+        const f32 k = orthoHalfHeight() * 2.0f / std::max(1.0f, m_uiH);
+        m_pivot += Vec3{-io.MouseDelta.x * k, io.MouseDelta.y * k, 0.0f};
+    } else if (dragging && orbit) {
         m_yaw += io.MouseDelta.x * 0.006f;
         m_pitch = std::clamp(m_pitch + io.MouseDelta.y * 0.006f, -1.55f, 1.55f);
     } else if (dragging && pan) {
@@ -2877,8 +2960,8 @@ void App::viewportInput() {
     // Right drag + WASD/QE flies the pivot (big scenes)
     if (dragging && orbit && !io.WantTextInput) {
         const f32 speed = m_distance * 0.8f * io.DeltaTime * (io.KeyShift ? 3.0f : 1.0f);
-        const Vec3 forward = cameraForward();
-        const Vec3 right = normalize(cross({0, 1, 0}, forward));
+        const Vec3 forward = m_view2d ? Vec3{0, 1, 0} : cameraForward(); // 2D: W/S move up and down on the plane
+        const Vec3 right = m_view2d ? Vec3{1, 0, 0} : normalize(cross({0, 1, 0}, forward));
         if (ImGui::IsKeyDown(ImGuiKey_W)) m_pivot += forward * speed;
         if (ImGui::IsKeyDown(ImGuiKey_S)) m_pivot -= forward * speed;
         if (ImGui::IsKeyDown(ImGuiKey_D)) m_pivot += right * speed;
@@ -2886,6 +2969,428 @@ void App::viewportInput() {
         if (ImGui::IsKeyDown(ImGuiKey_E)) m_pivot.y += speed;
         if (ImGui::IsKeyDown(ImGuiKey_Q)) m_pivot.y -= speed;
     }
+}
+
+// ---------------------------------------------------------------- Sprites
+
+namespace {
+int fieldInt(const Entity& e, const char* key, int fallback) {
+    f32 v = static_cast<f32>(fallback);
+    parseFloat(e.field(key), v);
+    return static_cast<int>(v);
+}
+struct PivotPreset {
+    const char* name;
+    f32 x, y;
+};
+// 3 x 3 like the image: top row first (pivotY 1 = top, 0 = bottom: the quad's y runs from -pivotY to 1 - pivotY)
+constexpr PivotPreset kPivots[9] = {{trn("Top left"), 0.0f, 1.0f},    {trn("Top"), 0.5f, 1.0f},    {trn("Top right"), 1.0f, 1.0f},
+                                    {trn("Left"), 0.0f, 0.5f},        {trn("Center"), 0.5f, 0.5f}, {trn("Right"), 1.0f, 0.5f},
+                                    {trn("Bottom left"), 0.0f, 0.0f}, {trn("Bottom"), 0.5f, 0.0f}, {trn("Bottom right"), 1.0f, 0.0f}};
+} // namespace
+
+void App::drawSpriteInspector(Entity& e) {
+    ImGui::SeparatorText(tr("Sprite"));
+    const std::string image = e.field("image");
+    row(tr("Image"));
+    if (ImGui::BeginCombo("##image", image.empty() ? tr("(none)") : image.c_str(), ImGuiComboFlags_HeightLarge)) {
+        static char search[64];
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##search", tr("Search"), search, sizeof(search));
+        const std::string s = lower(search);
+        const f32 side = ImGui::GetTextLineHeight() * 1.6f;
+        for (const std::string& f : m_assets.files(".png")) {
+            if (!s.empty() && lower(f).find(s) == std::string::npos) continue;
+            ImGui::PushID(f.c_str());
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            if (ImGui::Selectable("##pick", f == image, 0, {0.0f, side})) e.setField("image", f);
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            if (const u64 picture = m_showThumbs ? thumbnail(f) : 0)
+                draw->AddImage(ImTextureRef(static_cast<ImTextureID>(picture)), at, {at.x + side, at.y + side});
+            draw->AddText({at.x + side + ImGui::GetStyle().ItemSpacing.x, at.y + (side - ImGui::GetTextLineHeight()) * 0.5f},
+                          ImGui::GetColorU32(ImGuiCol_Text), f.c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    if (image.empty()) {
+        ImGui::TextDisabled(tr("Pick a PNG here, or drag one from Assets into the view."));
+        return;
+    }
+    const SpriteEntry& whole = m_assets.sprite(image, 1, 1, 0, 0.5f, 0.5f, false, false);
+    if (!whole.error.empty()) {
+        ImGui::TextColored({1.0f, 0.5f, 0.4f, 1.0f}, "%s", whole.error.c_str());
+        return;
+    }
+    int columns = std::max(1, fieldInt(e, "columns", 1)), rows = std::max(1, fieldInt(e, "rows", 1));
+    int cell = std::clamp(fieldInt(e, "cell", 0), 0, columns * rows - 1);
+    row(tr("Columns, rows"));
+    int grid[2] = {columns, rows};
+    if (ImGui::DragInt2("##grid", grid, 0.05f, 1, 256)) {
+        columns = std::max(1, grid[0]);
+        rows = std::max(1, grid[1]);
+        e.setField("columns", std::to_string(columns));
+        e.setField("rows", std::to_string(rows));
+        cell = std::min(cell, columns * rows - 1);
+        e.setField("cell", std::to_string(cell));
+    }
+    ImGui::TextDisabled(tr("%u x %u pixels, one cell %u x %u"), whole.cellWidth, whole.cellHeight, whole.cellWidth / columns, whole.cellHeight / rows);
+
+    // Slicer: the whole image with the cell grid; click a cell to show it
+    m_sheetWanted = image;
+    const f32 side = std::min(ImGui::GetContentRegionAvail().x, static_cast<f32>(kSheetSize) * 1.5f);
+    const f32 aspect = whole.cellHeight ? static_cast<f32>(whole.cellWidth) / static_cast<f32>(whole.cellHeight) : 1.0f;
+    const f32 w = aspect >= 1.0f ? side : side * aspect, h = aspect >= 1.0f ? side / aspect : side;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##sheet", {std::max(side, 1.0f), std::max(h, 1.0f)});
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 lo{at.x + (side - w) * 0.5f, at.y}, hi{lo.x + w, lo.y + h};
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(lo, hi, ImGui::GetColorU32(ImGuiCol_FrameBg));
+    if (m_sheetTarget && m_sheetDrawn == image) {
+        // The picture fits the image into a square (prepareSheet): the image part of it
+        const f32 du = aspect >= 1.0f ? 0.0f : (1.0f - aspect) * 0.5f, dv = aspect >= 1.0f ? (1.0f - 1.0f / aspect) * 0.5f : 0.0f;
+        if (const mkrhi::Texture texture = m_renderer->renderTargetTexture(m_sheetTarget))
+            dl->AddImage(ImTextureRef(static_cast<ImTextureID>(mkrhi::imguiTextureId(m_renderer->device(), texture))), lo, hi, {du, dv}, {1.0f - du, 1.0f - dv});
+    }
+    const f32 cw = w / static_cast<f32>(columns), ch = h / static_cast<f32>(rows);
+    const ImU32 lineColor = IM_COL32(255, 255, 255, 70);
+    if (cw >= 3.0f)
+        for (int c = 1; c < columns; ++c) dl->AddLine({lo.x + cw * c, lo.y}, {lo.x + cw * c, hi.y}, lineColor);
+    if (ch >= 3.0f)
+        for (int r = 1; r < rows; ++r) dl->AddLine({lo.x, lo.y + ch * r}, {hi.x, lo.y + ch * r}, lineColor);
+    const auto cellRect = [&](int index, ImVec2& a, ImVec2& b) {
+        a = {lo.x + cw * static_cast<f32>(index % columns), lo.y + ch * static_cast<f32>(index / columns)};
+        b = {a.x + cw, a.y + ch};
+    };
+    ImVec2 a, b;
+    cellRect(cell, a, b);
+    dl->AddRect(a, b, IM_COL32(255, 200, 60, 255), 0.0f, 0, 2.0f);
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    if (hovered && mouse.x >= lo.x && mouse.x < hi.x && mouse.y >= lo.y && mouse.y < hi.y) {
+        const int c = std::clamp(static_cast<int>((mouse.x - lo.x) / cw), 0, columns - 1), r = std::clamp(static_cast<int>((mouse.y - lo.y) / ch), 0, rows - 1);
+        const int index = r * columns + c;
+        cellRect(index, a, b);
+        dl->AddRect(a, b, IM_COL32(90, 200, 255, 230), 0.0f, 0, 1.5f);
+        ImGui::SetTooltip(tr("Cell %d (column %d, row %d)"), index, c + 1, r + 1);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) e.setField("cell", std::to_string(index));
+    }
+
+    // Pivot: 3 x 3 buttons placed like the point they set on the image
+    f32 px = 0.5f, py = 0.5f;
+    parseFloat(e.field("pivotX"), px);
+    parseFloat(e.field("pivotY"), py);
+    row(tr("Pivot"));
+    const f32 button = ImGui::GetFrameHeight() * 0.8f;
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    for (int i = 0; i < 9; ++i) {
+        const PivotPreset& p = kPivots[i];
+        ImGui::SetCursorScreenPos({start.x + (button + 2.0f) * static_cast<f32>(i % 3), start.y + (button + 2.0f) * static_cast<f32>(i / 3)});
+        ImGui::PushID(i);
+        const bool active = std::fabs(px - p.x) < 1e-3f && std::fabs(py - p.y) < 1e-3f;
+        if (active) ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
+        if (ImGui::Button("##pivot", {button, button})) {
+            e.setField("pivotX", floatText(p.x));
+            e.setField("pivotY", floatText(p.y));
+        }
+        if (active) ImGui::PopStyleColor();
+        ImGui::SetItemTooltip("%s", tr(p.name));
+        ImGui::PopID();
+    }
+    ImGui::SetCursorScreenPos({start.x, start.y + (button + 2.0f) * 3.0f});
+    ImGui::Dummy({0.0f, 0.0f});
+}
+
+void App::prepareSheet() {
+    m_sheetPending = false;
+    const std::string wanted = std::move(m_sheetWanted);
+    m_sheetWanted.clear();
+    if (wanted.empty() || wanted == m_sheetDrawn) return;
+    const SpriteEntry& s = m_assets.sprite(wanted, 1, 1, 0, 0.5f, 0.5f, false, false);
+    m_sheetList.clear();
+    if (s.mesh != kNoMesh) { // the 1 m quad scaled to the image's shape, fitted into the square
+        const f32 aspect = s.cellHeight ? static_cast<f32>(s.cellWidth) / static_cast<f32>(s.cellHeight) : 1.0f;
+        InstanceData inst;
+        inst.scale = aspect >= 1.0f ? Vec3{1.0f, 1.0f / aspect, 1.0f} : Vec3{aspect, 1.0f, 1.0f};
+        m_sheetList.add(s.mesh, inst);
+    }
+    FrameParams& frame = m_sheetFrame;
+    frame = FrameParams{};
+    frame.viewport = {0.0f, 0.0f, static_cast<f32>(kSheetSize), static_cast<f32>(kSheetSize)};
+    const Vec3 eye{0.0f, 0.0f, -2.0f};
+    frame.viewProj = lookAtLH(eye, {0, 0, 0}, {0, 1, 0}) * orthographicReversedZ(0.5f, 1.0f, 0.01f, 10.0f);
+    frame.cameraPos = eye;
+    frame.cameraForward = {0, 0, 1};
+    frame.skyColor = frame.groundColor = frame.fogColor = {0.12f, 0.12f, 0.13f};
+    frame.fogDensity = 0.0f;
+    frame.post.toneMapping = false; // the image's own colors
+    frame.post.bloomIntensity = 0.0f;
+    m_sheetDrawn = wanted;
+    m_sheetPending = true;
+}
+
+// ---------------------------------------------------------------- Field handles
+
+void App::drawFieldHandles() {
+    m_handleUsing = false;
+    Entity* e = m_scene.find(m_selected);
+    const KindInfo* kind = e ? findKind(e->kind) : nullptr;
+    if (!e || !kind || m_uiW < 2.0f || m_hidden.count(e->id) || brushActive()) {
+        m_radiusDrag.clear();
+        return;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    dl->PushClipRect({m_uiX, m_uiY}, {m_uiX + m_uiW, m_uiY + m_uiH}, true);
+    const Vec3 c = worldTransform(m_scene, *e).position;
+    const ImVec2 mouse = io.MousePos;
+    const bool inside = mouse.x >= m_uiX && mouse.y >= m_uiY && mouse.x < m_uiX + m_uiW && mouse.y < m_uiY + m_uiH;
+    for (const KindField& f : kind->fields) {
+        if (f.hint.find("gizmo=radius") == std::string::npos) continue;
+        f32 r = 0.0f;
+        if (!parseFloat(e->field(f.path), r)) parseFloat(f.value, r);
+        r = std::max(r, 0.0f);
+        const bool dragging = m_radiusDrag == f.path && m_radiusDragId == e->id;
+        const auto ring = [&](bool upright, ImU32 color) { // upright: the x/y plane, else the ground plane
+            ImVec2 prev{};
+            bool havePrev = false;
+            for (int i = 0; i <= 64; ++i) {
+                const f32 t = static_cast<f32>(i) / 64.0f * 2.0f * kPi;
+                const Vec3 p = upright ? c + Vec3{std::cos(t) * r, std::sin(t) * r, 0.0f} : c + Vec3{std::cos(t) * r, 0.0f, std::sin(t) * r};
+                f32 x, y;
+                const bool ok = project(p, x, y);
+                if (ok && havePrev) dl->AddLine(prev, {x, y}, color, dragging ? 2.0f : 1.5f);
+                prev = {x, y};
+                havePrev = ok;
+            }
+        };
+        f32 hx, hy;
+        if (!project(c + Vec3{r, 0.0f, 0.0f}, hx, hy)) continue;
+        const bool hot = dragging || (inside && !io.WantCaptureMouse && !m_gizmoUsing && m_radiusDrag.empty() && std::hypot(mouse.x - hx, mouse.y - hy) < 8.0f);
+        const ImU32 color = dragging || hot ? IM_COL32(255, 200, 60, 255) : IM_COL32(120, 220, 255, 210);
+        if (!m_view2d) ring(false, color);
+        ring(true, m_view2d ? color : (color & 0x00FFFFFFu) | (90u << 24));
+        const f32 size = hot ? 6.5f : 5.0f;
+        dl->AddCircleFilled({hx, hy}, size, color);
+        dl->AddCircle({hx, hy}, size, IM_COL32(20, 20, 24, 255), 0, 1.5f);
+        if (hot) {
+            m_handleUsing = true;
+            const std::string label = (f.label.empty() ? f.path : f.label) + "  " + floatText(std::round(r * 100.0f) / 100.0f);
+            dl->AddText({hx + 10.0f, hy - ImGui::GetTextLineHeight() * 0.5f}, IM_COL32(235, 235, 235, 240), label.c_str());
+        }
+        if (hot && !dragging && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            m_radiusDrag = f.path;
+            m_radiusDragId = e->id;
+        }
+        if (!dragging) continue;
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            m_radiusDrag.clear();
+            continue;
+        }
+        // The distance from the center on the plane the ring lies on (2D: the x/y plane, 3D: the ground plane through the object)
+        Vec3 eye, dir;
+        mouseRay(mouse.x, mouse.y, eye, dir);
+        f32 next = r;
+        if (m_view2d && std::fabs(dir.z) > 1e-4f) {
+            const Vec3 p = eye + dir * ((c.z - eye.z) / dir.z);
+            next = std::hypot(p.x - c.x, p.y - c.y);
+        } else if (!m_view2d && std::fabs(dir.y) > 1e-3f && (c.y - eye.y) / dir.y > 0.0f) {
+            const Vec3 p = eye + dir * ((c.y - eye.y) / dir.y);
+            next = std::hypot(p.x - c.x, p.z - c.z);
+        }
+        if (io.KeyCtrl != m_alwaysSnap && m_snapMove > 0.0f) next = std::round(next / m_snapMove) * m_snapMove;
+        e->setField(f.path, floatText(std::round(std::max(next, 0.0f) * 1000.0f) / 1000.0f));
+    }
+    dl->PopClipRect();
+}
+
+// ---------------------------------------------------------------- Hierarchy icons and problems
+
+const char* App::entityIcon(const Entity& e) const {
+    if (e.is(kKindPointLight)) return kIconLight;
+    if (e.is(kKindCamera)) return kIconCamera;
+    if (e.is(kKindProbe)) return kIconProbe;
+    if (e.is(kKindSprite)) return kIconImage;
+    if (isArea(e)) return kIconArea;
+    if (isMarker(e)) return kIconPin;
+    if (!e.model.empty()) return kIconModel;
+    if (e.is(kKindSolid) || e.is(kKindDecoration) || e.is(kKindTerrain) || e.is(kKindScatter)) return kIconBox;
+    return kIconFlag;
+}
+
+// What MkRender can see without the game: model and image files that don't load, sprites without an image, kinds the project
+// doesn't have, probes not baked. Field values (rows, required fields) are checked by the editor, which has the game's types
+void App::updateBadges() {
+    if (m_badgesAt >= 0.0 && m_time - m_badgesAt < 0.5) return;
+    m_badgesAt = m_time;
+    m_badges.clear();
+    for (const Entity& e : m_scene.entities) {
+        const auto add = [&](bool error, std::string text) {
+            Badge& b = m_badges[e.id];
+            if (b.text.empty() || (error && !b.error)) b = {error, std::move(text)};
+        };
+        if (!e.model.empty()) {
+            const ModelEntry& m = m_assets.model(e.model);
+            if (!m.ok) add(true, trf("Model %s: %s", e.model.c_str(), m.error.c_str()));
+            else if (!m.warnings.empty()) add(false, e.model + ": " + m.warnings.front());
+        }
+        if (e.is(kKindSprite)) {
+            const std::string image = e.field("image");
+            if (image.empty()) {
+                add(false, tr("No image"));
+            } else {
+                const SpriteEntry& s = m_assets.sprite(image, 1, 1, 0, 0.5f, 0.5f, false, false);
+                if (!s.error.empty()) add(true, trf("Image %s: %s", image.c_str(), s.error.c_str()));
+            }
+        }
+        if (m_kindsLoaded && !findKind(e.kind)) add(false, trf("Unknown kind %s: not in the project's object kinds", e.kind.c_str()));
+        if (e.is(kKindProbe) && e.field("bake").empty()) add(false, tr("Reflection probe not baked"));
+    }
+}
+
+// ---------------------------------------------------------------- Look Dev
+
+namespace {
+constexpr f32 kLookFovY = 35.0f * kDeg;
+// The editor's LookdevPanel presets: sun direction and color, sky, ground, background. HDRIs from the project come after them
+struct LookPreset {
+    const char* name;
+    Vec3 sunDirection, sunColor, sky, ground, background;
+};
+constexpr LookPreset kLookPresets[] = {
+    {trn("Neutral studio"), {0.45f, 0.75f, -0.5f}, {1.0f, 1.0f, 1.0f}, {0.32f, 0.32f, 0.34f}, {0.16f, 0.16f, 0.16f}, {0.20f, 0.20f, 0.22f}},
+    {trn("Daylight"), {0.4f, 0.8f, 0.3f}, {1.0f, 0.95f, 0.85f}, {0.18f, 0.36f, 0.85f}, {0.20f, 0.17f, 0.14f}, {0.55f, 0.70f, 0.95f}},
+    {trn("Sunset"), {-0.7f, 0.25f, -0.4f}, {1.0f, 0.55f, 0.30f}, {0.22f, 0.18f, 0.32f}, {0.10f, 0.07f, 0.05f}, {0.32f, 0.22f, 0.28f}},
+    {trn("Night"), {0.2f, 0.6f, -0.6f}, {0.35f, 0.45f, 0.75f}, {0.06f, 0.08f, 0.14f}, {0.02f, 0.02f, 0.03f}, {0.03f, 0.04f, 0.07f}},
+};
+constexpr u32 kLookPresetCount = static_cast<u32>(sizeof(kLookPresets) / sizeof(kLookPresets[0]));
+} // namespace
+
+void App::drawLookDev() {
+    m_lookVisible = false;
+    // First run with a saved layout from before this window: a tab beside the inspector
+    if (!ImGui::FindWindowSettingsByID(ImHashStr("###Look Dev")))
+        if (ImGuiWindow* inspector = ImGui::FindWindowByID(ImHashStr("###Inspector")); inspector && inspector->DockId)
+            ImGui::SetNextWindowDockID(inspector->DockId, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(panelTitle(kIconLookDev, "Look Dev").c_str())) {
+        m_lookVisible = true;
+        const bool hdri = m_lookPreset >= kLookPresetCount && m_lookPreset - kLookPresetCount < m_lookHdris.size();
+        row(tr("Light"));
+        if (ImGui::BeginCombo("##light", hdri ? m_lookHdris[m_lookPreset - kLookPresetCount].c_str() : tr(kLookPresets[std::min(m_lookPreset, kLookPresetCount - 1)].name))) {
+            if (ImGui::IsWindowAppearing()) m_lookHdris = m_assets.files(".hdr"); // newly added HDRIs
+            for (u32 i = 0; i < kLookPresetCount; ++i)
+                if (ImGui::Selectable(tr(kLookPresets[i].name), m_lookPreset == i)) m_lookPreset = i;
+            if (!m_lookHdris.empty()) ImGui::Separator();
+            for (u32 i = 0; i < m_lookHdris.size(); ++i)
+                if (ImGui::Selectable(m_lookHdris[i].c_str(), m_lookPreset == kLookPresetCount + i)) m_lookPreset = kLookPresetCount + i;
+            ImGui::EndCombo();
+        }
+        const char* lightingNames[] = {tr("Scene setting"), "Pbr", "Toon", "Unlit"};
+        int lighting = m_lookLighting + 1;
+        row(tr("Lighting model"));
+        if (ImGui::Combo("##lighting", &lighting, lightingNames, 4)) m_lookLighting = lighting - 1;
+        row(tr("Turn"));
+        checkbox("##turn", &m_lookSpin);
+        row(tr("Zoom"));
+        ImGui::SliderFloat("##zoom", &m_lookZoom, 0.5f, 3.0f, "%.2f");
+        row(tr("Flash"));
+        ImGui::SliderFloat("##flash", &m_lookFlash, 0.0f, 1.0f, "%.2f");
+        row(tr("Dissolve"));
+        ImGui::SliderFloat("##dissolve", &m_lookDissolve, 0.0f, 1.0f, "%.2f");
+
+        std::string model = m_lookModel;
+        if (model.empty())
+            if (const Entity* e = m_scene.find(m_selected)) model = e->model;
+        if (model.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", tr("Click a model in Assets > Models, or select an object with a model."));
+            ImGui::PopStyleColor();
+        }
+        else if (!m_lookFound) ImGui::TextDisabled("%s", trf("Cannot load %s", model.c_str()).c_str());
+        else ImGui::TextDisabled("%s", model.c_str());
+
+        // A square fitting the space left; dragging turns the stand and tilts the camera, the wheel zooms
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const f32 side = std::max(64.0f, std::min(avail.x, avail.y));
+        const mkrhi::Texture texture = m_lookTarget ? m_renderer->renderTargetTexture(m_lookTarget) : mkrhi::Texture{};
+        if (texture) ImGui::Image(ImTextureRef(static_cast<ImTextureID>(mkrhi::imguiTextureId(m_renderer->device(), texture))), {side, side});
+        else ImGui::Dummy({side, side});
+        if (ImGui::IsItemHovered()) {
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                const ImVec2 d = ImGui::GetIO().MouseDelta;
+                m_lookYaw -= d.x * 0.01f;
+                m_lookPitch = std::clamp(m_lookPitch + d.y * 0.01f, -0.3f, 1.4f);
+                m_lookSpin = false;
+            }
+            const f32 wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f) m_lookZoom = std::clamp(m_lookZoom * (wheel > 0.0f ? 1.1f : 1.0f / 1.1f), 0.5f, 3.0f);
+        }
+    }
+    ImGui::End();
+}
+
+void App::prepareLookDev(f64 dt) {
+    m_lookPending = false;
+    if (!m_lookVisible || m_shot) return;
+    if (m_lookSpin) m_lookYaw += static_cast<f32>(dt) * 0.5f;
+    std::string path = m_lookModel;
+    if (path.empty())
+        if (const Entity* e = m_scene.find(m_selected)) path = e->model;
+    const ModelEntry* model = path.empty() ? nullptr : &m_assets.model(path);
+    m_lookFound = model && model->ok;
+    const bool hdri = m_lookPreset >= kLookPresetCount && m_lookPreset - kLookPresetCount < m_lookHdris.size();
+    const LookPreset& light = kLookPresets[hdri ? 0 : std::min(m_lookPreset, kLookPresetCount - 1)];
+
+    // The camera distance fits the model's box, centered on the stand
+    Vec3 lo{-0.5f, 0.0f, -0.5f}, hi{0.5f, 1.0f, 0.5f};
+    if (m_lookFound) lo = model->boundsMin, hi = model->boundsMax;
+    const Vec3 size = hi - lo;
+    const f32 radius = std::max(0.5f * length(size), 0.05f);
+    const Vec3 center{0.0f, 0.5f * size.y, 0.0f};
+    const f32 distance = radius / std::sin(kLookFovY * 0.5f) * 1.3f / m_lookZoom;
+    const Vec3 eye = center + Vec3{0.0f, std::sin(m_lookPitch), -std::cos(m_lookPitch)} * distance;
+
+    FrameParams& frame = m_lookFrame;
+    frame = FrameParams{};
+    frame.viewport = {0.0f, 0.0f, static_cast<f32>(kLookSize), static_cast<f32>(kLookSize)};
+    frame.viewProj = lookAtLH(eye, center, {0, 1, 0}) * perspectiveReversedZ(kLookFovY, 1.0f, distance * 0.02f, distance * 4.0f);
+    frame.cameraPos = eye;
+    frame.cameraForward = normalize(center - eye);
+    frame.sunDirection = light.sunDirection;
+    frame.sunColor = light.sunColor;
+    frame.skyColor = light.sky;
+    frame.groundColor = light.ground;
+    frame.fogColor = light.background;
+    frame.fogDensity = 0.0f;
+    if (hdri) frame.environment = m_assets.environment(m_lookHdris[m_lookPreset - kLookPresetCount]).id;
+    frame.time = static_cast<f32>(std::fmod(m_time, 4096.0)); // wind sway
+
+    m_lookList.clear();
+    const Quat spin = fromEuler({0.0f, m_lookYaw / kDeg, 0.0f});
+    const f32 plinth = std::max(size.x, size.z) * 0.6f + radius * 0.15f; // the stand: a flat box under the model's feet, turning with it
+    InstanceData stand;
+    stand.position = {0.0f, -radius * 0.05f, 0.0f};
+    stand.color = rgba(150, 154, 166);
+    stand.rotation = spin;
+    stand.scale = {plinth * 2.0f, radius * 0.1f, plinth * 2.0f};
+    m_lookList.add(m_assets.box(), stand);
+    if (m_lookFound) {
+        const Vec3 base{-(lo.x + hi.x) * 0.5f, -lo.y, -(lo.z + hi.z) * 0.5f}; // the box's bottom center onto the stand
+        InstanceData inst;
+        inst.position = rotate(spin, base);
+        inst.rotation = spin;
+        inst.flags = instanceDissolve(instanceFlash(0, m_lookFlash), m_lookDissolve);
+        if (model->skinned()) {
+            restPose(model->skeleton, m_pose);
+            skinPalette(model->skeleton, m_pose, m_palette);
+            m_lookList.addSkinned(model->mesh, inst, m_palette.data(), static_cast<u32>(m_palette.size()));
+        } else {
+            m_lookList.add(model->mesh, inst);
+        }
+    }
+    m_lookDrawLighting = m_lookLighting < 0 ? m_lighting : static_cast<LightingModel>(std::min<i32>(m_lookLighting, static_cast<i32>(kLightingModelCount) - 1));
+    m_lookPending = true;
 }
 
 // ---------------------------------------------------------------- Assets window
@@ -2999,7 +3504,8 @@ void App::drawAssets() {
                         files = std::string(ext) == ".glb" ? m_assets.modelFiles() : m_assets.files(ext);
                     }
                     ImGui::TextDisabled("%s", hint);
-                    const bool grid = m_showThumbs && (std::string(ext) == ".glb" || std::string(ext) == ".png");
+                    const bool models = std::string(ext) == ".glb";
+                    const bool grid = m_showThumbs &&(std::string(ext) == ".glb" || std::string(ext) == ".png");
                     const f32 cell = ImGui::GetFontSize() * 5.0f, textHeight = ImGui::GetTextLineHeight();
                     if (ImGui::BeginChild("files")) {
                         for (const std::string& f : files) {
@@ -3007,7 +3513,7 @@ void App::drawAssets() {
                             ImGui::PushID(f.c_str());
                             if (grid) { // picture, then the file name cut to the cell
                                 const ImVec2 at = ImGui::GetCursorScreenPos();
-                                ImGui::Selectable("##cell", false, ImGuiSelectableFlags_AllowDoubleClick, {cell, cell + textHeight});
+                                ImGui::Selectable("##cell", models && f == m_lookModel, ImGuiSelectableFlags_AllowDoubleClick, {cell, cell + textHeight});
                                 ImDrawList* draw = ImGui::GetWindowDrawList();
                                 if (const u64 picture = thumbnail(f))
                                     draw->AddImage(ImTextureRef(static_cast<ImTextureID>(picture)), at, {at.x + cell, at.y + cell});
@@ -3019,8 +3525,9 @@ void App::drawAssets() {
                                 draw->PopClipRect();
                                 ImGui::SetItemTooltip("%s", f.c_str());
                             } else {
-                                ImGui::Selectable(f.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
+                                ImGui::Selectable(f.c_str(), models && f == m_lookModel, ImGuiSelectableFlags_AllowDoubleClick);
                             }
+                            if (models && ImGui::IsItemClicked()) m_lookModel = f; // Look Dev shows it
                             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) placeAsset(f, m_pivot);
                             if (ImGui::BeginDragDropSource()) {
                                 ImGui::SetDragDropPayload(kDragAsset, f.data(), f.size());

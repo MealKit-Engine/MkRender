@@ -3,7 +3,7 @@
 Only work that is left. When an item is done, remove it here and describe it in the engine's `docs/CHANGELOG.md` under the item's name (MkRender versions are in `git log`).
 Sources: engine `docs/ROADMAP.md` "Scene editing in MkRender, leftovers", "MkRender leftovers" and "Design refresh for the rest of the suite"; engine `docs/TOOL_DESIGN.md` sections 6 and 7.
 
-**Suggested order**: 1 (look, small and visible every day) → 2 → 3 → 4.
+**Suggested order**: 1 (look, small and visible every day) → 3 → 4; 2 when the engine has flipbook clips.
 
 ## 1. Suite look (engine TOOL_DESIGN section 6 checklist)
 
@@ -14,18 +14,9 @@ MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title 
 - [ ] **First screen and empty states** to icon + label buttons with one primary button (`Open Scene`), the empty-state sentence in Body Large (TOOL_DESIGN 1, 4).
 - [ ] Section 6 item 7: a screenshot beside the editor at the same DPI, then update the MkRender row of TOOL_DESIGN section 7.
 
-## 2. Scene editing leftovers (engine ROADMAP "Scene editing in MkRender, leftovers")
+## 2. Sprites, later
 
-- [ ] **Sprite editing** (moved from the MealKit editor, engine `docs/DECISIONS.md` 2026-11-13 "Sprite editing lives in MkRender"; engine ROADMAP "2D on the 3D engine"). Already here: sprites drawn, picked by their quad, a PNG dropped from Assets placed as a sprite, PNG pictures in Assets. Left:
-  - An image picker for the `image` field (PNGs from Assets) and a sheet slicer (columns/rows, preview of the chosen cell, click a cell to set `cell`).
-  - Pivot presets (center, bottom center, corners) beside `pivotX`/`pivotY`.
-  - The project's `view2d`: an orthographic front view that doesn't turn, and the rotate gizmo about z only.
-  - Later, with the engine's flipbook clips: previewing a clip on the selected sprite.
-- [ ] Field handles in the viewport for `gizmo=radius` fields (kinds file).
-- [ ] The editor's object icons and problem markers in the hierarchy (kind icons: module-editor `ImGuiLayer.h` `icon::`).
-- [ ] Look Dev on a model (the editor keeps one on the model picked in its [Assets]).
-
-When these are in, the engine side drops the unused editing half of `asset/Terrain` and `asset/Scatter` and the editor's leftover scene-editing members (engine ROADMAP, same item).
+- [ ] With the engine's flipbook clips (engine ROADMAP "2D on the 3D engine"): previewing a clip on the selected sprite.
 
 ## 3. Render goldens without the engine (engine ROADMAP "MkRender leftovers")
 

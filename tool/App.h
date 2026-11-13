@@ -8,6 +8,7 @@
 
 #include <mkcontract/Live.h>
 
+#include <cmath>
 #include <deque>
 #include <map>
 #include <filesystem>
@@ -163,6 +164,53 @@ private:
     bool brushInput(bool free); // true: the mouse belongs to the brush this frame
     void drawBrushInspector(Entity& e);
     void drawBrushOutline(const Heightmap* map, Vec3 center, Vec3 size, u32 color);
+
+    // Sprites (inspector): image picker, a sheet slicer over a picture of the whole image (click a cell), pivot presets
+    void drawSpriteInspector(Entity& e);
+    void prepareSheet(); // fill(): the picture of m_sheetWanted when it isn't drawn yet
+    mkrhi::RenderTarget m_sheetTarget{};
+    std::string m_sheetWanted, m_sheetDrawn; // image the slicer shows this frame / image in m_sheetTarget
+    bool m_sheetPending = false;
+    DrawList m_sheetList;
+    FrameParams m_sheetFrame;
+
+    // 2D projects (mealkit.project view2d, like the MealKit editor): orthographic, looking along +z at the XY plane, no turning,
+    // the grid on z = 0 and the rotate gizmo about z only
+    bool m_view2d = false;
+    f32 orthoHalfHeight() const { return m_distance * std::tan(m_fov * 0.5f * 3.14159265f / 180.0f); }
+
+    // Field handles: each "gizmo=radius" field of the selected object (kinds file hint) as rings around it with a handle to drag
+    void drawFieldHandles();
+    bool m_handleUsing = false; // the mouse belongs to a handle this frame (no click select)
+    std::string m_radiusDrag;   // field path being dragged
+    u32 m_radiusDragId = 0;
+
+    // Hierarchy: the kind icon before each name (the editor's scene tree icons) and a "!" badge for problems found in the scene
+    const char* entityIcon(const Entity& e) const;
+    struct Badge {
+        bool error = false; // red; else orange (a warning)
+        std::string text;
+    };
+    std::map<u32, Badge> m_badges;
+    f64 m_badgesAt = -1.0;
+    void updateBadges(); // twice a second
+
+    // Look Dev: one model under fixed lighting on a turning stand, apart from the scene lighting (the editor's [Look Dev] page).
+    // The model is the one clicked in Assets > Models, else the selected object's
+    void drawLookDev();
+    void prepareLookDev(f64 dt); // fill(): only while the window is visible
+    std::string m_lookModel;
+    mkrhi::RenderTarget m_lookTarget{};
+    DrawList m_lookList;
+    FrameParams m_lookFrame;
+    LightingModel m_lookDrawLighting = LightingModel::Pbr;
+    bool m_lookVisible = false, m_lookPending = false, m_lookFound = false;
+    u32 m_lookPreset = 0;    // color preset, beyond them an .hdr from m_lookHdris
+    i32 m_lookLighting = -1; // -1: the scene's lighting model
+    f32 m_lookYaw = 0.6f, m_lookPitch = 0.25f, m_lookZoom = 1.0f, m_lookFlash = 0.0f, m_lookDissolve = 0.0f;
+    bool m_lookSpin = true;
+    std::vector<std::string> m_lookHdris;
+    f64 m_lastDt = 0.0;
 
     void* m_window = nullptr;
     Renderer* m_renderer = nullptr;

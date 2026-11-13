@@ -68,6 +68,9 @@ public:
 private:
     // Flat square icon button with its name in the tooltip (engine docs/TOOL_DESIGN.md section 1); the name as the label without the icon font
     bool iconButton(const char* glyph, const char* name, const char* detail = nullptr);
+    // Panel tab title "glyph  Name###Name" (engine docs/TOOL_DESIGN.md section 1 "Panel tabs"): the id after ### stays the same with or
+    // without the icon font, so the saved dock layout and --window <Name> keep working
+    std::string panelTitle(const char* glyph, const char* name) const;
     enum class Pending { None, Quit, OpenPath, NewScene };
     enum class Gizmo { Translate, Rotate, Scale };
 

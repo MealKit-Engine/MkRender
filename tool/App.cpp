@@ -32,6 +32,72 @@ constexpr const char* kIconRefresh = "\xEE\x9C\xAC"; // U+E72C
 constexpr const char* kIconPlay = "\xEE\x9D\xA8";    // U+E768
 constexpr const char* kIconCamera = "\xEE\x9C\xA2";  // U+E722 capture
 constexpr const char* kIconClear = "\xEE\xA2\x94";   // U+E894
+// Panel tabs (engine docs/TOOL_DESIGN.md section 2 "Panels")
+constexpr const char* kIconTree = "\xEE\xA3\xBD";        // U+E8FD Hierarchy
+constexpr const char* kIconInspector = "\xEE\xA7\xA9";   // U+E9E9
+constexpr const char* kIconFolder = "\xEE\xA2\xB7";      // U+E8B7 Assets
+constexpr const char* kIconBrightness = "\xEE\x9C\x86";  // U+E706 Environment
+constexpr const char* kIconPerformance = "\xEE\xA7\x99"; // U+E9D9 Stats
+
+// Checkbox and radio colors (engine docs/TOOL_DESIGN.md 3.1, 3.2): a gray 4 box on a gray 2 panel is about 1.25:1, so an unchecked
+// box gets a gray 9 outline (gray 11 hovered) and a checked one the accent fill with a gray 12 mark
+const ImVec4 kControlOutline(0x8A / 255.0f, 0x8A / 255.0f, 0x8A / 255.0f, 1.0f);      // gray 9
+const ImVec4 kControlOutlineHover(0xAF / 255.0f, 0xAF / 255.0f, 0xAF / 255.0f, 1.0f); // gray 11
+const ImVec4 kControlMark(0xEB / 255.0f, 0xEB / 255.0f, 0xEB / 255.0f, 1.0f);         // gray 12
+const ImVec4 kAccent(0x3B / 255.0f, 0x63 / 255.0f, 0xFB / 255.0f, 1.0f);
+const ImVec4 kAccentHover(0x4B / 255.0f, 0x75 / 255.0f, 0xFF / 255.0f, 1.0f);
+const ImVec4 kAccentDown(0x27 / 255.0f, 0x4D / 255.0f, 0xEA / 255.0f, 1.0f);
+
+// Pushes the fill and mark of a checkbox or radio button in the state it is drawn in; pop 4 colors and 1 var after
+void pushControlColors(bool on) {
+    const ImVec4 clear(0.0f, 0.0f, 0.0f, 0.0f);
+    const ImGuiStyle& s = ImGui::GetStyle();
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, on ? kAccent : clear);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, on ? kAccentHover : s.Colors[ImGuiCol_FrameBg]);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, on ? kAccentDown : s.Colors[ImGuiCol_FrameBgHovered]);
+    ImGui::PushStyleColor(ImGuiCol_CheckMark, kControlMark);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, s.FrameRounding * 0.5f); // a 4 px box, not the round 8 px of fields
+}
+
+void popControlColors() {
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+}
+
+// Every checkbox goes through here, never ImGui::Checkbox (engine docs/TOOL_DESIGN.md 3.2)
+bool checkbox(const char* label, bool* v) {
+    const bool on = *v;
+    pushControlColors(on);
+    const bool changed = ImGui::Checkbox(label, v);
+    const f32 rounding = ImGui::GetStyle().FrameRounding;
+    popControlColors();
+    if (!on) {
+        // The box is the square at the start of the item (ImGui::Checkbox check_bb)
+        const ImVec2 p = ImGui::GetItemRectMin();
+        const f32 size = ImGui::GetFrameHeight();
+        const f32 width = std::max(1.0f, ImGui::GetStyle().FontScaleDpi);
+        const f32 inset = width * 0.5f;
+        ImGui::GetWindowDrawList()->AddRect({p.x + inset, p.y + inset}, {p.x + size - inset, p.y + size - inset},
+                                            ImGui::GetColorU32(ImGui::IsItemHovered() ? kControlOutlineHover : kControlOutline), rounding, 0, width);
+    }
+    return changed;
+}
+
+bool radioButton(const char* label, bool active) {
+    pushControlColors(active);
+    const bool pressed = ImGui::RadioButton(label, active);
+    popControlColors();
+    if (!active) {
+        // Same circle as ImGui::RadioButton: radius (square - 1) / 2 around the square's center
+        const ImVec2 p = ImGui::GetItemRectMin();
+        const f32 size = ImGui::GetFrameHeight();
+        const f32 width = std::max(1.0f, ImGui::GetStyle().FontScaleDpi);
+        const ImVec2 center(std::floor(p.x + size * 0.5f + 0.5f), std::floor(p.y + size * 0.5f + 0.5f));
+        ImGui::GetWindowDrawList()->AddCircle(center, (size - 1.0f) * 0.5f - width * 0.5f,
+                                              ImGui::GetColorU32(ImGui::IsItemHovered() ? kControlOutlineHover : kControlOutline), 0, width);
+    }
+    return pressed;
+}
 
 Quat conjugate(Quat q) { return {-q.x, -q.y, -q.z, q.w}; }
 
@@ -1201,7 +1267,7 @@ void App::drawBrushInspector(Entity& e) {
     } else {
         ImGui::TextDisabled("%zu instances", m_assets.scatter(path).items.size());
     }
-    ImGui::Checkbox("Brush (B)", &m_brushOn);
+    checkbox("Brush (B)", &m_brushOn);
     if (!terrain) {
         ImGui::SameLine();
         if (iconButton(kIconClear, "Clear instances") && !m_assets.scatter(path).items.empty()) {
@@ -1220,12 +1286,12 @@ void App::drawBrushInspector(Entity& e) {
         static const char* names[] = {"Raise", "Lower", "Flatten", "Smooth"};
         for (int i = 0; i < 4; ++i) {
             if (i) ImGui::SameLine();
-            if (ImGui::RadioButton(names[i], m_brush == i)) m_brush = i;
+            if (radioButton(names[i], m_brush == i)) m_brush = i;
         }
     } else {
-        if (ImGui::RadioButton("Paint", !m_scatterErase)) m_scatterErase = false;
+        if (radioButton("Paint", !m_scatterErase)) m_scatterErase = false;
         ImGui::SameLine();
-        if (ImGui::RadioButton("Erase", m_scatterErase)) m_scatterErase = true;
+        if (radioButton("Erase", m_scatterErase)) m_scatterErase = true;
     }
     row("Radius (m)");
     ImGui::SliderFloat("##bradius", &m_brushRadius, 0.5f, 64.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
@@ -1755,9 +1821,9 @@ void App::frame(f64 dt) {
     const ImGuiID dockspace = ImGui::GetID("MkRenderDock");
     if (!m_layoutDone) {
         m_layoutDone = true;
-        const ImGuiWindowSettings* assets = ImGui::FindWindowSettingsByID(ImHashStr("Assets"));
+        const ImGuiWindowSettings* assets = ImGui::FindWindowSettingsByID(ImHashStr("###Assets"));
         const bool assetsDocked = assets && assets->DockId != 0; // layouts saved before the Assets window existed
-        if (!ImGui::DockBuilderGetNode(dockspace) || !ImGui::FindWindowSettingsByID(ImHashStr("Hierarchy")) || !assetsDocked)
+        if (!ImGui::DockBuilderGetNode(dockspace) || !ImGui::FindWindowSettingsByID(ImHashStr("###Hierarchy")) || !assetsDocked)
             layoutDocks(dockspace);
     }
     drawMenu();
@@ -1777,7 +1843,7 @@ void App::frame(f64 dt) {
     drawHierarchy();
     drawAssets();
     if (!focusWindow.empty() && m_time > 0.1) {
-        ImGui::SetWindowFocus(focusWindow.c_str());
+        ImGui::SetWindowFocus(("###" + focusWindow).c_str());
         focusWindow.clear();
     }
     drawInspector();
@@ -1807,11 +1873,11 @@ void App::layoutDocks(unsigned dockspace) {
     ImGuiID left = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Left, 0.2f, nullptr, &rest);
     const ImGuiID right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.27f, nullptr, &rest);
     const ImGuiID leftBottom = ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.3f, nullptr, &left);
-    ImGui::DockBuilderDockWindow("Hierarchy", left);
-    ImGui::DockBuilderDockWindow("Stats", leftBottom);
-    ImGui::DockBuilderDockWindow("Assets", leftBottom);
-    ImGui::DockBuilderDockWindow("Inspector", right);
-    ImGui::DockBuilderDockWindow("Environment", right);
+    ImGui::DockBuilderDockWindow("###Hierarchy", left);
+    ImGui::DockBuilderDockWindow("###Stats", leftBottom);
+    ImGui::DockBuilderDockWindow("###Assets", leftBottom);
+    ImGui::DockBuilderDockWindow("###Inspector", right);
+    ImGui::DockBuilderDockWindow("###Environment", right);
     ImGui::DockBuilderFinish(dockspace);
 }
 
@@ -2159,8 +2225,12 @@ bool App::iconButton(const char* glyph, const char* name, const char* detail) {
     return pressed;
 }
 
+std::string App::panelTitle(const char* glyph, const char* name) const {
+    return (iconFont ? std::string(glyph) + "  " : std::string()) + name + "###" + name;
+}
+
 void App::drawHierarchy() {
-    if (ImGui::Begin("Hierarchy")) {
+    if (ImGui::Begin(panelTitle(kIconTree, "Hierarchy").c_str())) {
         if (iconButton(kIconAdd, "Add object")) ImGui::OpenPopup("add");
         if (ImGui::BeginPopup("add")) {
             drawAddMenu();
@@ -2254,7 +2324,7 @@ void App::drawFields(Entity& e) {
             enumCombo(enumNames.data(), static_cast<int>(enumNames.size()));
         } else if (kf && kf->type == "bool") {
             bool on = value == "true";
-            if (ImGui::Checkbox("##v", &on)) value = on ? "true" : "false";
+            if (checkbox("##v", &on)) value = on ? "true" : "false";
         } else if (kf && kf->type == "color") {
             if (!parseColorText(value, color)) color[0] = color[1] = color[2] = color[3] = 255;
             f32 c[4] = {color[0] / 255.0f, color[1] / 255.0f, color[2] / 255.0f, color[3] / 255.0f};
@@ -2280,7 +2350,7 @@ void App::drawFields(Entity& e) {
         else if (e.is(kKindCamera) && key == "ease") enumCombo(eases, 3);
         else if (value == "true" || value == "false") {
             bool on = value == "true";
-            if (ImGui::Checkbox("##v", &on)) value = on ? "true" : "false";
+            if (checkbox("##v", &on)) value = on ? "true" : "false";
         } else if (parseColorText(value, color)) {
             f32 c[4] = {color[0] / 255.0f, color[1] / 255.0f, color[2] / 255.0f, color[3] / 255.0f};
             if (ImGui::ColorEdit4("##v", c, ImGuiColorEditFlags_AlphaPreviewHalf)) {
@@ -2317,7 +2387,7 @@ void App::drawFields(Entity& e) {
 }
 
 void App::drawInspector() {
-    if (ImGui::Begin("Inspector")) {
+    if (ImGui::Begin(panelTitle(kIconInspector, "Inspector").c_str())) {
         Entity* found = m_scene.find(m_selected);
         if (!found) {
             ImGui::TextDisabled("Select an object in the hierarchy or the viewport.");
@@ -2401,7 +2471,7 @@ void App::drawInspector() {
             if (ImGui::ColorEdit4("##color", c, ImGuiColorEditFlags_AlphaPreviewHalf)) e.color = floatsToColor(c);
             bool checker = (e.flags & kInstanceChecker) != 0;
             row("Checker");
-            if (ImGui::Checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
+            if (checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
             if (e.is(kKindScatter) || e.is(kKindTerrain)) drawBrushInspector(e);
             if (!e.model.empty()) {
                 const ModelEntry& m = m_assets.model(e.model);
@@ -2436,7 +2506,7 @@ void App::drawInspector() {
 }
 
 void App::drawEnvironment() {
-    if (ImGui::Begin("Environment")) {
+    if (ImGui::Begin(panelTitle(kIconBrightness, "Environment").c_str())) {
         Environment& env = m_scene.environment;
         ImGui::SeparatorText("Sun");
         const Vec3 d = normalize(env.sunDirection);
@@ -2498,7 +2568,7 @@ void App::drawEnvironment() {
         const auto boolRow = [&](const char* key, const char* label) {
             bool on = env.postValue(key) != "false";
             row(label);
-            if (ImGui::Checkbox((std::string("##") + key).c_str(), &on)) env.setPost(key, on ? "true" : "false");
+            if (checkbox((std::string("##") + key).c_str(), &on)) env.setPost(key, on ? "true" : "false");
         };
         const auto floatRow = [&](const char* key, const char* label, f32 lo, f32 hi) {
             f32 v = 0.0f;
@@ -2532,12 +2602,12 @@ void App::drawEnvironment() {
 }
 
 void App::drawStats() {
-    if (ImGui::Begin("Stats")) {
+    if (ImGui::Begin(panelTitle(kIconPerformance, "Stats").c_str())) {
         const RenderStats& s = m_renderer->stats();
         ImGui::Text("%.0f fps, %u draw calls, %u instances", m_fps, s.drawCalls, s.instances);
         if (s.gpuValid) ImGui::Text("GPU %.2f ms (opaque %.2f, shadow %.2f, post %.2f)", s.gpuFrameMs, s.gpuPassMs[0], s.gpuPassMs[1], s.gpuPassMs[2]);
         bool vsync = m_renderer->vsync();
-        if (ImGui::Checkbox("VSync", &vsync)) m_renderer->setVsync(vsync);
+        if (checkbox("VSync", &vsync)) m_renderer->setVsync(vsync);
         ImGui::SeparatorText("Log");
         if (ImGui::BeginChild("log", {0, 0}, ImGuiChildFlags_Borders)) {
             for (const std::string& w : m_warnings) ImGui::TextColored({1.0f, 0.75f, 0.3f, 1.0f}, "%s", w.c_str());
@@ -2880,13 +2950,13 @@ void App::drawAssets() {
         if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
-    if (ImGui::Begin("Assets")) {
+    if (ImGui::Begin(panelTitle(kIconFolder, "Assets").c_str())) {
         if (m_assets.assetsDir().empty()) {
             ImGui::TextDisabled("Open a project to see its assets.");
         } else {
             if (iconButton(kIconRefresh, "Rescan")) m_assets.rescan();
             ImGui::SameLine();
-            if (ImGui::Checkbox("Pictures", &m_showThumbs)) savePrefs();
+            if (checkbox("Pictures", &m_showThumbs)) savePrefs();
             ImGui::SameLine();
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputTextWithHint("##assetfilter", "Search assets", m_assetFilter, sizeof(m_assetFilter));

@@ -57,4 +57,6 @@ install(FILES ${CMAKE_BINARY_DIR}/bin/mealkit-tool.txt DESTINATION .)
 
 if(WIN32)
     target_sources(MkRender PRIVATE res/MkRender.rc) # app icon (engine docs/TOOL_DESIGN.md section 5)
+    # rc.exe reports no dependencies: without this a regenerated icon never reaches the exe
+    set_source_files_properties(res/MkRender.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/MkRender.ico")
 endif()

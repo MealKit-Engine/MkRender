@@ -16,7 +16,11 @@ MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title 
 
 ## 2. Scene editing leftovers (engine ROADMAP "Scene editing in MkRender, leftovers")
 
-- [ ] Sprite sheet slicer and pivot presets.
+- [ ] **Sprite editing** (moved from the MealKit editor, engine `docs/DECISIONS.md` 2026-11-13 "Sprite editing lives in MkRender"; engine ROADMAP "2D on the 3D engine"). Already here: sprites drawn, picked by their quad, a PNG dropped from Assets placed as a sprite, PNG pictures in Assets. Left:
+  - An image picker for the `image` field (PNGs from Assets) and a sheet slicer (columns/rows, preview of the chosen cell, click a cell to set `cell`).
+  - Pivot presets (center, bottom center, corners) beside `pivotX`/`pivotY`.
+  - The project's `view2d`: an orthographic front view that doesn't turn, and the rotate gizmo about z only.
+  - Later, with the engine's flipbook clips: previewing a clip on the selected sprite.
 - [ ] Field handles in the viewport for `gizmo=radius` fields (kinds file).
 - [ ] The editor's object icons and problem markers in the hierarchy (kind icons: module-editor `ImGuiLayer.h` `icon::`).
 - [ ] Look Dev on a model (the editor keeps one on the model picked in its [Assets]).

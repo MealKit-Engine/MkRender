@@ -42,6 +42,8 @@ bool readToolManifest(const std::string& folder, ToolManifest& out, std::string*
             std::from_chars(value.data(), value.data() + value.size(), n);
             out.protocol = n;
         } else if (key == "opens") out.opens = splitWords(value);
+        else if (key == "summary") out.summary = value;
+        else if (key == "icon") out.icon = value;
         else out.warnings.push_back("unknown key '" + key + "' ignored");
     }
     if (out.name.empty() || exe.empty() || out.protocol == 0) {
@@ -88,6 +90,33 @@ std::vector<ToolManifest> findTools(const std::vector<std::string>& roots, std::
     }
     std::sort(out.begin(), out.end(), [](const ToolManifest& a, const ToolManifest& b) { return a.name < b.name; });
     return out;
+}
+
+std::vector<AvailableTool> readAvailableTools() {
+    std::vector<AvailableTool> out;
+    for (const std::string& line : readList(userPath(kAvailableTools))) {
+        if (line.empty() || line[0] == '#' || line[0] == '@') continue;
+        std::vector<std::string> f;
+        size_t start = 0;
+        for (size_t tab; (tab = line.find('\t', start)) != std::string::npos; start = tab + 1) f.push_back(line.substr(start, tab - start));
+        f.push_back(line.substr(start));
+        if (f.empty() || f[0].empty()) continue;
+        f.resize(4);
+        out.push_back({f[0], f[1], f[2], f[3]});
+    }
+    return out;
+}
+
+bool writeAvailableTools(const std::vector<AvailableTool>& tools) {
+    std::vector<std::string> lines = {"# Tools MealKit Manager can install (name, version, summary, icon). Rewritten by the Manager",
+                                      std::string("@format available-tools 1")};
+    auto clean = [](std::string s) {
+        for (char& c : s)
+            if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+        return s;
+    };
+    for (const AvailableTool& t : tools) lines.push_back(clean(t.name) + "\t" + clean(t.version) + "\t" + clean(t.summary) + "\t" + clean(t.icon));
+    return writeList(userPath(kAvailableTools), lines);
 }
 
 } // namespace mkcontract

@@ -32,6 +32,7 @@ void addEngine(const std::string& directory);
 
 // Editor settings values
 std::string editorSetting(const char* key);
+bool setEditorSetting(const char* key, const std::string& value); // other settings are kept (the Manager sets language)
 std::vector<std::string> toolPaths(); // "toolPath <folder>" lines
 
 } // namespace mkcontract

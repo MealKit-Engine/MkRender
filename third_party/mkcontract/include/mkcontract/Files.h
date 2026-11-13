@@ -25,6 +25,8 @@ bool writeList(const std::string& path, const std::vector<std::string>& list);
 std::string readKey(const std::string& path, std::string_view key);
 // Every value of a key that may repeat ("toolPath <folder>" lines)
 std::vector<std::string> readKeys(const std::string& path, std::string_view key);
+// Sets the first "key value" line (appended when missing; a blank value removes it). Other lines and comments are kept
+bool writeKey(const std::string& path, std::string_view key, const std::string& value);
 
 // Folder notation used in every list: absolute, native separators, no trailing separator
 std::string normalizeDirectory(const std::string& directory);

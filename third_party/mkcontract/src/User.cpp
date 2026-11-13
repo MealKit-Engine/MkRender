@@ -96,6 +96,8 @@ void addEngine(const std::string& directory) {
 
 std::string editorSetting(const char* key) { return readKey(userPath(kEditorSettings), key); }
 
+bool setEditorSetting(const char* key, const std::string& value) { return writeKey(userPath(kEditorSettings), key, value); }
+
 std::vector<std::string> toolPaths() { return readKeys(userPath(kEditorSettings), "toolPath"); }
 
 } // namespace mkcontract

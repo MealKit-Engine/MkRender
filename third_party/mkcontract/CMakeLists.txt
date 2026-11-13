@@ -5,7 +5,7 @@
 #   mkcontract          text files, user folder, tool manifests, live connection info, module list (standard library only)
 #   mkcontract_client   live connection client (sockets). Tools link it; the engine doesn't
 cmake_minimum_required(VERSION 3.25)
-project(mkcontract VERSION 0.3.0 LANGUAGES CXX)
+project(mkcontract VERSION 0.5.0 LANGUAGES CXX)
 
 option(MKCONTRACT_BUILD_TESTS "Build mkcontract tests" ${PROJECT_IS_TOP_LEVEL})
 

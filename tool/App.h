@@ -59,6 +59,7 @@ public:
     void linkLook(u32 cameraId, const std::string& cutscene = {});
     bool linkPlayWhenReady = false;
     std::string focusWindow;
+    std::string languageOverride; // --lang: used instead of the suite language, which isn't followed then
     // Graphics regression shots (--render-golden): the whole window from the editor's fly camera (eye, yaw/pitch in degrees, 60 degree fov),
     // no UI, no selection, view time 0 (animation clips at their offset, wind still)
     void setShot(Vec3 eye, f32 yawDegrees, f32 pitchDegrees);
@@ -128,6 +129,8 @@ private:
     // Screen
     void layoutDocks(unsigned dockspace);
     void drawMenu();
+    // Language icon at the right end of the menu bar: the languages by their own names (engine docs/TOOL_DESIGN.md section 4 "Language")
+    void drawLanguageButton();
     void drawHierarchy();
     void drawTreeNode(const Entity& e);
     void drawInspector();

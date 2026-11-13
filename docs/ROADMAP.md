@@ -11,7 +11,6 @@ MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title 
 
 - [ ] **Brush radio buttons in a capture**: the terrain and scatter brush radio buttons use `radioButton` but haven't been seen on screen yet.
 - [ ] **A right-click item for each icon action** (TOOL_DESIGN 1 "second way in"): hierarchy rows, viewport toolbar, Environment and Assets buttons.
-- [ ] **Korean text**: fill the Korean table for every `tr()` string (today a few lines), with the suite's missing-translation check once it exists (workspace `UX_DESIGN_REFERENCES_2026-11-13.md` D6).
 - [ ] **First screen and empty states** to icon + label buttons with one primary button (`Open Scene`), the empty-state sentence in Body Large (TOOL_DESIGN 1, 4).
 - [ ] Section 6 item 7: a screenshot beside the editor at the same DPI, then update the MkRender row of TOOL_DESIGN section 7.
 

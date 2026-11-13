@@ -69,6 +69,21 @@ std::vector<std::string> readKeys(const std::string& path, std::string_view key)
     return out;
 }
 
+bool writeKey(const std::string& path, std::string_view key, const std::string& value) {
+    std::string text, k, v;
+    bool done = false;
+    for (const std::string& line : readList(path)) {
+        if (!done && splitKeyValue(line, k, v) && k == key) {
+            done = true;
+            if (!value.empty()) text += std::string(key) + " " + value + "\n";
+            continue;
+        }
+        text += line + "\n";
+    }
+    if (!done && !value.empty()) text += std::string(key) + " " + value + "\n";
+    return writeFile(path, text);
+}
+
 std::string normalizeDirectory(const std::string& directory) {
     if (directory.empty()) return {};
     std::error_code ec;

@@ -1,7 +1,7 @@
 // MkRender executable: SDL3 window, mkrender drawing into it (DX12 or Vulkan, the backend MkRender was built with),
 // Dear ImGui panels drawn by mkrhi's ImGui backend. The actual screen is App (scene editor).
 //   MkRender [--project <MealKit project folder>] [--file <.scene|.gltf|.glb>] [file] [--select <id>[,<id>...]]
-//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--editor-play] [--window <name>] [--render-golden <shots.txt> <folder>] [--version]
+//            [--lighting pbr|toon|unlit] [--debug-layer] [--frames N --capture <png>] [--bake-probes] [--grading-capture] [--editor-play] [--window <name>] [--lang ko|en] [--render-golden <shots.txt> <folder>] [--version]
 //   MkRender --check-terrain <file.png|file.scatter>   decodes and encodes with mkterrain: "TERRAIN same" when the bytes come back
 //   MkRender --check-scene <file.scene>   reads and writes the scene in memory: "SCENE same" when the text comes back
 //            unchanged, "SCENE equal" when only float text differs (old %.9g files), else the first differing line (exit 1)
@@ -294,6 +294,7 @@ int checkScene(const std::string& path) {
 int main(int argc, char** argv) {
     std::string project, file, capture;
     std::string focusWindow; // --window Assets: that window in front
+    std::string language;    // --lang en: this run only, the suite setting stays (captures)
     std::string goldenShots, goldenOut; // --render-golden <shots.txt> <folder>: the engine's graphics regression shots, saved as <name>.png
     bool editorPlay = false; // --editor-play: ask the project's running editor to play the scene once it's found
     bool bakeProbes = false, gradingCapture = false; // --bake-probes, --grading-capture: run once after opening (with --frames for scripts)
@@ -312,6 +313,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--grading-capture") == 0) gradingCapture = true;
         else if (std::strcmp(argv[i], "--editor-play") == 0) editorPlay = true;
         else if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) focusWindow = argv[++i];
+        else if (std::strcmp(argv[i], "--lang") == 0 && i + 1 < argc) language = argv[++i];
         else if (std::strcmp(argv[i], "--render-golden") == 0 && i + 2 < argc) goldenShots = argv[++i], goldenOut = argv[++i];
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--check-terrain") == 0 && i + 1 < argc) return checkTerrain(argv[++i]);
@@ -402,6 +404,7 @@ int main(int argc, char** argv) {
     if (gradingCapture) app.requestGradingCapture();
     app.linkPlayWhenReady = editorPlay;
     app.focusWindow = focusWindow;
+    app.languageOverride = language;
 
     // --render-golden: "name scene x y z yaw pitch [pbr|toon|unlit]" lines (MealKit engine/tests/golden/shots.txt), scenes relative to the project's assets
     struct Shot {

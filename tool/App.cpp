@@ -1,10 +1,12 @@
 #include "App.h"
+#include "Strings.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder (first layout)
 #include <ImGuizmo.h>
 #include <mkcontract/Client.h>
+#include <mkcontract/User.h>
 
 #include <algorithm>
 #include <climits>
@@ -38,6 +40,7 @@ constexpr const char* kIconInspector = "\xEE\xA7\xA9";   // U+E9E9
 constexpr const char* kIconFolder = "\xEE\xA2\xB7";      // U+E8B7 Assets
 constexpr const char* kIconBrightness = "\xEE\x9C\x86";  // U+E706 Environment
 constexpr const char* kIconPerformance = "\xEE\xA7\x99"; // U+E9D9 Stats
+constexpr const char* kIconLanguage = "\xEF\x8A\xB7";    // U+F2B7 LocaleLanguage
 
 // Checkbox and radio colors (engine docs/TOOL_DESIGN.md 3.1, 3.2): a gray 4 box on a gray 2 panel is about 1.25:1, so an unchecked
 // box gets a gray 9 outline (gray 11 hovered) and a checked one the accent fill with a gray 12 mark
@@ -245,6 +248,8 @@ bool App::init(void* sdlWindow, Renderer& renderer) {
     m_renderer = &renderer;
     m_assets.init(renderer);
     loadPrefs();
+    loadLanguage();
+    if (!languageOverride.empty()) setLanguage(languageOverride);
     newScene();
     return true;
 }
@@ -857,7 +862,7 @@ void App::autosave() {
     std::error_code ec;
     std::filesystem::create_directories(pathOf(path).parent_path(), ec);
     std::string error;
-    if (saveScene(path, m_scene, error)) m_status = "Autosaved to " + path, m_statusTime = m_time;
+    if (saveScene(path, m_scene, error)) m_status = trf("Autosaved to %s", path.c_str()), m_statusTime = m_time;
     else log("Autosave failed: " + error);
 }
 
@@ -1238,39 +1243,39 @@ bool App::brushInput(bool free) {
 
 void App::drawBrushInspector(Entity& e) {
     const bool terrain = e.is(kKindTerrain);
-    ImGui::SeparatorText(terrain ? "Terrain brush" : "Scatter brush");
+    ImGui::SeparatorText(terrain ? tr("Terrain brush") : tr("Scatter brush"));
     const std::string key = terrain ? "heightmap" : "file";
     std::string path = e.field(key);
     if (path.empty()) {
         if (m_project.empty()) {
-            ImGui::TextDisabled("Open a project to paint (files go to its assets/terrain).");
+            ImGui::TextDisabled(tr("Open a project to paint (files go to its assets/terrain)."));
             return;
         }
         const std::string made = "terrain/" + sceneStem() + "_" + std::to_string(e.id) + (terrain ? ".png" : ".scatter"); // scene::terrainFileFor
-        if (iconButton(kIconAdd, terrain ? "New flat heightmap" : "New instance file")) {
+        if (iconButton(kIconAdd, terrain ? tr("New flat heightmap") : tr("New instance file"))) {
             snapshot();
             e.setField(key, made);
             if (terrain) m_assets.createHeightmap(made, flatHeightmap(129, 16384)); // 128 cells, a quarter up so brushes can dig
             else m_assets.scatterEdit(made);
             m_brushOn = true;
         }
-        ImGui::SetItemTooltip("%s (written when the scene is saved)", made.c_str());
+        ImGui::SetItemTooltip(tr("%s (written when the scene is saved)"), made.c_str());
         return;
     }
     if (terrain) {
         const Heightmap* map = m_assets.heightmap(path);
         if (!map) {
-            ImGui::TextColored({1.0f, 0.6f, 0.2f, 1.0f}, "Cannot read %s", path.c_str());
+            ImGui::TextColored({1.0f, 0.6f, 0.2f, 1.0f}, tr("Cannot read %s"), path.c_str());
             return;
         }
-        ImGui::TextDisabled("%u x %u samples, %.2f m cells", map->size, map->size, worldTransform(m_scene, e).scale.x / static_cast<f32>(map->size - 1));
+        ImGui::TextDisabled(tr("%u x %u samples, %.2f m cells"), map->size, map->size, worldTransform(m_scene, e).scale.x / static_cast<f32>(map->size - 1));
     } else {
-        ImGui::TextDisabled("%zu instances", m_assets.scatter(path).items.size());
+        ImGui::TextDisabled(tr("%zu instances"), m_assets.scatter(path).items.size());
     }
-    checkbox("Brush (B)", &m_brushOn);
+    checkbox(tr("Brush (B)"), &m_brushOn);
     if (!terrain) {
         ImGui::SameLine();
-        if (iconButton(kIconClear, "Clear instances") && !m_assets.scatter(path).items.empty()) {
+        if (iconButton(kIconClear, tr("Clear instances")) && !m_assets.scatter(path).items.empty()) {
             m_strokeBefore = {};
             m_strokeBefore.terrain = false;
             m_strokeBefore.path = path;
@@ -1283,22 +1288,22 @@ void App::drawBrushInspector(Entity& e) {
     }
     ImGui::BeginDisabled(!m_brushOn);
     if (terrain) {
-        static const char* names[] = {"Raise", "Lower", "Flatten", "Smooth"};
+        const char* names[] = {tr("Raise"), tr("Lower"), tr("Flatten"), tr("Smooth")}; // per frame: follows a language change
         for (int i = 0; i < 4; ++i) {
             if (i) ImGui::SameLine();
             if (radioButton(names[i], m_brush == i)) m_brush = i;
         }
     } else {
-        if (radioButton("Paint", !m_scatterErase)) m_scatterErase = false;
+        if (radioButton(tr("Paint"), !m_scatterErase)) m_scatterErase = false;
         ImGui::SameLine();
-        if (radioButton("Erase", m_scatterErase)) m_scatterErase = true;
+        if (radioButton(tr("Erase"), m_scatterErase)) m_scatterErase = true;
     }
-    row("Radius (m)");
+    row(tr("Radius (m)"));
     ImGui::SliderFloat("##bradius", &m_brushRadius, 0.5f, 64.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
-    row("Strength");
+    row(tr("Strength"));
     ImGui::SliderFloat("##bstrength", &m_brushStrength, 0.01f, 1.0f, "%.2f");
-    ImGui::TextDisabled(terrain ? "Left drag paints; Flatten keeps the height under the stroke start; Ctrl+Z undoes a stroke"
-                                : "Left drag paints onto terrain and floors (Shift erases); density and sizes are fields below");
+    ImGui::TextDisabled(terrain ? tr("Left drag paints; Flatten keeps the height under the stroke start; Ctrl+Z undoes a stroke")
+                                : tr("Left drag paints onto terrain and floors (Shift erases); density and sizes are fields below"));
     ImGui::EndDisabled();
 }
 
@@ -1392,28 +1397,28 @@ void App::linkLook(u32 cameraId, const std::string& cutscene) {
 }
 
 void App::drawLinkMenu() {
-    if (!ImGui::BeginMenu("Editor")) return;
-    if (m_project.empty()) ImGui::TextDisabled("Open a project: MkRender looks for its running MealKit editor");
-    else if (!m_linkFound) ImGui::TextDisabled("No MealKit editor running for this project");
+    if (!ImGui::BeginMenu(tr("Editor"))) return;
+    if (m_project.empty()) ImGui::TextDisabled(tr("Open a project: MkRender looks for its running MealKit editor"));
+    else if (!m_linkFound) ImGui::TextDisabled(tr("No MealKit editor running for this project"));
     else {
-        ImGui::TextDisabled("Editor (pid %u): %s, %s%s", m_editor.pid, m_linkMode == "play" ? "playing" : "editing",
-                            m_linkScene.empty() ? "no scene" : m_linkScene.c_str(), m_linkDirty ? " (unsaved there)" : "");
-        if (!m_linkGame) ImGui::TextDisabled("Its game code isn't loaded yet (build it in the editor)");
+        ImGui::TextDisabled(tr("Editor (pid %u): %s, %s%s"), m_editor.pid, m_linkMode == "play" ? tr("playing") : tr("editing"),
+                            m_linkScene.empty() ? tr("no scene") : m_linkScene.c_str(), m_linkDirty ? tr(" (unsaved there)") : "");
+        if (!m_linkGame) ImGui::TextDisabled(tr("Its game code isn't loaded yet (build it in the editor)"));
     }
     const bool can = m_linkFound && m_linkGame && m_linkMode != "play";
-    if (ImGui::MenuItem("Play in editor", "F5", false, can)) linkPlay(false);
-    if (ImGui::MenuItem("Play from here", "Shift+F5", false, can)) linkPlay(true);
-    ImGui::SetItemTooltip("Solo play from this camera (or from the selected spawn point)");
-    if (ImGui::MenuItem("Stop", "F5", false, m_linkFound && m_linkMode == "play")) linkStop();
+    if (ImGui::MenuItem(tr("Play in editor"), "F5", false, can)) linkPlay(false);
+    if (ImGui::MenuItem(tr("Play from here"), "Shift+F5", false, can)) linkPlay(true);
+    ImGui::SetItemTooltip(tr("Solo play from this camera (or from the selected spawn point)"));
+    if (ImGui::MenuItem(tr("Stop"), "F5", false, m_linkFound && m_linkMode == "play")) linkStop();
     ImGui::Separator();
     const Entity* e = m_scene.find(m_selected);
-    if (ImGui::MenuItem("Look through selected camera", nullptr, false, m_linkFound && e && e->is(kKindCamera) && m_linkMode != "play")) linkLook(e->id);
+    if (ImGui::MenuItem(tr("Look through selected camera"), nullptr, false, m_linkFound && e && e->is(kKindCamera) && m_linkMode != "play")) linkLook(e->id);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
-    ImGui::InputTextWithHint("##cutscene", "cutscene name", m_cutsceneName, sizeof(m_cutsceneName));
+    ImGui::InputTextWithHint("##cutscene", tr("cutscene name"), m_cutsceneName, sizeof(m_cutsceneName));
     ImGui::SameLine();
-    if (iconButton(kIconPlay, "Preview cutscene") && m_cutsceneName[0] && m_linkFound) linkLook(0, m_cutsceneName);
-    if (ImGui::MenuItem("End preview", nullptr, false, m_linkFound && m_linkMode != "play")) linkStop();
-    ImGui::TextDisabled("The editor plays and previews the saved scene file; MkRender saves first.");
+    if (iconButton(kIconPlay, tr("Preview cutscene")) && m_cutsceneName[0] && m_linkFound) linkLook(0, m_cutsceneName);
+    if (ImGui::MenuItem(tr("End preview"), nullptr, false, m_linkFound && m_linkMode != "play")) linkStop();
+    ImGui::TextDisabled(tr("The editor plays and previews the saved scene file; MkRender saves first."));
     ImGui::EndMenu();
 }
 
@@ -1814,6 +1819,7 @@ void App::frame(f64 dt) {
     ImGuizmo::BeginFrame();
     syncSelection();
     checkExternalChange();
+    if (languageOverride.empty()) followLanguage(); // MealKit Manager or another Mk tool changed the suite language
     autosave();
     if (!m_project.empty() && fileTime(kindsPath()) != m_kindsTime) reloadKinds();
     pollLink();
@@ -1896,28 +1902,28 @@ void App::drawMenu() {
         }, this, static_cast<SDL_Window*>(m_window), nullptr, false);
     };
     if (ImGui::BeginMainMenuBar()) {
-        if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("New scene", "Ctrl+N")) guarded(Pending::NewScene);
-            if (ImGui::MenuItem("Open project...")) openProjectDialog();
-            if (ImGui::MenuItem("Open scene...", "Ctrl+O")) openSceneDialog();
-            if (ImGui::BeginMenu("Recent scenes", !m_recent.empty())) {
+        if (ImGui::BeginMenu(tr("File"))) {
+            if (ImGui::MenuItem(tr("New scene"), "Ctrl+N")) guarded(Pending::NewScene);
+            if (ImGui::MenuItem(tr("Open project..."))) openProjectDialog();
+            if (ImGui::MenuItem(tr("Open scene..."), "Ctrl+O")) openSceneDialog();
+            if (ImGui::BeginMenu(tr("Recent scenes"), !m_recent.empty())) {
                 for (const std::string& r : m_recent)
                     if (ImGui::MenuItem(r.c_str(), nullptr, r == m_path)) guarded(Pending::OpenPath, r);
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Project scenes", !m_assets.assetsDir().empty())) {
+            if (ImGui::BeginMenu(tr("Project scenes"), !m_assets.assetsDir().empty())) {
                 for (const std::string& s : m_assets.files(".scene"))
                     if (ImGui::MenuItem(s.c_str(), nullptr, m_assets.resolve(s) == m_path)) guarded(Pending::OpenPath, m_assets.resolve(s));
                 ImGui::EndMenu();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Save", "Ctrl+S")) save();
-            if (ImGui::MenuItem("Save as...")) saveAs();
-            if (ImGui::MenuItem("Reload from disk", nullptr, false, !m_path.empty())) reloadFromDisk();
+            if (ImGui::MenuItem(tr("Save"), "Ctrl+S")) save();
+            if (ImGui::MenuItem(tr("Save as..."))) saveAs();
+            if (ImGui::MenuItem(tr("Reload from disk"), nullptr, false, !m_path.empty())) reloadFromDisk();
             {
                 std::error_code ec;
                 const std::string backup = autosavePath();
-                if (ImGui::MenuItem("Recover autosave", nullptr, false, !backup.empty() && std::filesystem::is_regular_file(pathOf(backup), ec))) {
+                if (ImGui::MenuItem(tr("Recover autosave"), nullptr, false, !backup.empty() && std::filesystem::is_regular_file(pathOf(backup), ec))) {
                     Scene scene;
                     std::string error;
                     if (loadScene(backup, scene, error, nullptr)) {
@@ -1928,14 +1934,14 @@ void App::drawMenu() {
                         log("Cannot read " + backup + ": " + error);
                     }
                 }
-                ImGui::SetItemTooltip("Replace the scene with its last autosave (build/editor/autosave); undo goes back");
+                ImGui::SetItemTooltip(tr("Replace the scene with its last autosave (build/editor/autosave); undo goes back"));
             }
-            if (ImGui::MenuItem("Reload models")) {
+            if (ImGui::MenuItem(tr("Reload models"))) {
                 m_assets.reloadAll();
                 m_modelProblems.clear();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Save screenshot (3D only)")) {
+            if (ImGui::MenuItem(tr("Save screenshot (3D only)"))) {
                 if (char* dir = SDL_GetPrefPath("MealKit", "MkRender")) {
                     char name[64];
                     std::snprintf(name, sizeof(name), "screenshot_%llu.png", static_cast<unsigned long long>(SDL_GetTicks()));
@@ -1944,83 +1950,83 @@ void App::drawMenu() {
                 }
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Quit")) requestQuit();
+            if (ImGui::MenuItem(tr("Quit"))) requestQuit();
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("Edit")) {
-            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !m_undo.empty())) undo(false);
-            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !m_redo.empty())) undo(true);
+        if (ImGui::BeginMenu(tr("Edit"))) {
+            if (ImGui::MenuItem(tr("Undo"), "Ctrl+Z", false, !m_undo.empty())) undo(false);
+            if (ImGui::MenuItem(tr("Redo"), "Ctrl+Y", false, !m_redo.empty())) undo(true);
             ImGui::Separator();
-            if (ImGui::BeginMenu("Add")) {
+            if (ImGui::BeginMenu(tr("Add"))) {
                 drawAddMenu();
                 ImGui::EndMenu();
             }
-            if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, m_selected != 0)) duplicateSelected();
+            if (ImGui::MenuItem(tr("Duplicate"), "Ctrl+D", false, m_selected != 0)) duplicateSelected();
             if (ImGui::MenuItem("Delete", "Del", false, m_selected != 0)) deleteSelected();
-            if (ImGui::MenuItem("Select all", "Ctrl+A")) {
+            if (ImGui::MenuItem(tr("Select all"), "Ctrl+A")) {
                 m_selection.clear();
                 for (const Entity& e : m_scene.entities)
                     if (!m_hidden.count(e.id) && !m_locked.count(e.id)) m_selection.push_back(e.id);
                 m_selected = m_selection.empty() ? 0 : m_selection.back();
             }
             ImGui::Separator();
-            if (ImGui::BeginMenu("Arrange", m_selection.size() >= 2)) {
+            if (ImGui::BeginMenu(tr("Arrange"), m_selection.size() >= 2)) {
                 static const char* axes[] = {"X", "Y", "Z"};
                 for (int a = 0; a < 3; ++a) {
-                    if (ImGui::MenuItem((std::string("Align min ") + axes[a]).c_str())) alignSelection(a, 0);
-                    if (ImGui::MenuItem((std::string("Align center ") + axes[a]).c_str())) alignSelection(a, 1);
-                    if (ImGui::MenuItem((std::string("Align max ") + axes[a]).c_str())) alignSelection(a, 2);
+                    if (ImGui::MenuItem(trf("Align min %s", axes[a]).c_str())) alignSelection(a, 0);
+                    if (ImGui::MenuItem(trf("Align center %s", axes[a]).c_str())) alignSelection(a, 1);
+                    if (ImGui::MenuItem(trf("Align max %s", axes[a]).c_str())) alignSelection(a, 2);
                 }
                 ImGui::Separator();
                 for (int a = 0; a < 3; ++a)
-                    if (ImGui::MenuItem((std::string("Distribute ") + axes[a]).c_str(), nullptr, false, m_selection.size() >= 3)) distributeSelection(a);
-                ImGui::TextDisabled("Aligns to the last selected object");
+                    if (ImGui::MenuItem(trf("Distribute %s", axes[a]).c_str(), nullptr, false, m_selection.size() >= 3)) distributeSelection(a);
+                ImGui::TextDisabled(tr("Aligns to the last selected object"));
                 ImGui::EndMenu();
             }
-            if (ImGui::MenuItem("Drop to floor", "End", false, m_selected != 0)) dropToFloor();
+            if (ImGui::MenuItem(tr("Drop to floor"), "End", false, m_selected != 0)) dropToFloor();
             ImGui::Separator();
-            if (ImGui::MenuItem("Hide", "H", false, m_selected != 0)) setHidden(m_selection, true);
-            if (ImGui::MenuItem("Show all", "Shift+H", false, !m_hidden.empty())) {
+            if (ImGui::MenuItem(tr("Hide"), "H", false, m_selected != 0)) setHidden(m_selection, true);
+            if (ImGui::MenuItem(tr("Show all"), "Shift+H", false, !m_hidden.empty())) {
                 m_hidden.clear();
                 saveViewState();
             }
-            if (ImGui::MenuItem("Lock", nullptr, false, m_selected != 0)) setLocked(m_selection, true);
-            if (ImGui::MenuItem("Unlock all", nullptr, false, !m_locked.empty())) {
+            if (ImGui::MenuItem(tr("Lock"), nullptr, false, m_selected != 0)) setLocked(m_selection, true);
+            if (ImGui::MenuItem(tr("Unlock all"), nullptr, false, !m_locked.empty())) {
                 m_locked.clear();
                 saveViewState();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Save selection as prefab...", nullptr, false, m_selected != 0 && !m_assets.assetsDir().empty())) m_prefabPopup = true;
+            if (ImGui::MenuItem(tr("Save selection as prefab..."), nullptr, false, m_selected != 0 && !m_assets.assetsDir().empty())) m_prefabPopup = true;
             ImGui::EndMenu();
         }
         drawLinkMenu();
-        if (ImGui::BeginMenu("View")) {
-            if (ImGui::MenuItem("Frame selection", "F", false, m_selected != 0)) frameSelected();
-            if (ImGui::MenuItem("Move", "W", m_gizmo == Gizmo::Translate)) m_gizmo = Gizmo::Translate;
-            if (ImGui::MenuItem("Rotate", "E", m_gizmo == Gizmo::Rotate)) m_gizmo = Gizmo::Rotate;
-            if (ImGui::MenuItem("Scale", "R", m_gizmo == Gizmo::Scale)) m_gizmo = Gizmo::Scale;
-            ImGui::MenuItem("Local axes", nullptr, &m_gizmoLocal);
-            if (ImGui::MenuItem("Markers and areas", nullptr, &m_showMarkers)) savePrefs();
-            if (ImGui::MenuItem("Grid", "G", &m_showGrid)) savePrefs();
-            if (ImGui::BeginMenu("Grid and snap")) {
-                bool changed = ImGui::MenuItem("Always snap (Ctrl turns it off)", nullptr, &m_alwaysSnap);
+        if (ImGui::BeginMenu(tr("View"))) {
+            if (ImGui::MenuItem(tr("Frame selection"), "F", false, m_selected != 0)) frameSelected();
+            if (ImGui::MenuItem(tr("Move"), "W", m_gizmo == Gizmo::Translate)) m_gizmo = Gizmo::Translate;
+            if (ImGui::MenuItem(tr("Rotate"), "E", m_gizmo == Gizmo::Rotate)) m_gizmo = Gizmo::Rotate;
+            if (ImGui::MenuItem(tr("Scale"), "R", m_gizmo == Gizmo::Scale)) m_gizmo = Gizmo::Scale;
+            ImGui::MenuItem(tr("Local axes"), nullptr, &m_gizmoLocal);
+            if (ImGui::MenuItem(tr("Markers and areas"), nullptr, &m_showMarkers)) savePrefs();
+            if (ImGui::MenuItem(tr("Grid"), "G", &m_showGrid)) savePrefs();
+            if (ImGui::BeginMenu(tr("Grid and snap"))) {
+                bool changed = ImGui::MenuItem(tr("Always snap (Ctrl turns it off)"), nullptr, &m_alwaysSnap);
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-                changed |= ImGui::DragFloat("Grid step (m)", &m_gridStep, 0.05f, 0.05f, 100.0f, "%.2f");
+                changed |= ImGui::DragFloat(tr("Grid step (m)"), &m_gridStep, 0.05f, 0.05f, 100.0f, "%.2f");
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-                changed |= ImGui::DragFloat("Move step (m)", &m_snapMove, 0.05f, 0.01f, 100.0f, "%.2f");
+                changed |= ImGui::DragFloat(tr("Move step (m)"), &m_snapMove, 0.05f, 0.01f, 100.0f, "%.2f");
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-                changed |= ImGui::DragFloat("Rotate step (deg)", &m_snapRotate, 0.5f, 1.0f, 90.0f, "%.1f");
+                changed |= ImGui::DragFloat(tr("Rotate step (deg)"), &m_snapRotate, 0.5f, 1.0f, 90.0f, "%.1f");
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-                changed |= ImGui::DragFloat("Scale step", &m_snapScale, 0.01f, 0.01f, 10.0f, "%.2f");
+                changed |= ImGui::DragFloat(tr("Scale step"), &m_snapScale, 0.01f, 0.01f, 10.0f, "%.2f");
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-                changed |= ImGui::DragFloat("Autosave (min, 0 off)", &m_autosaveMinutes, 0.1f, 0.0f, 60.0f, "%.1f");
+                changed |= ImGui::DragFloat(tr("Autosave (min, 0 off)"), &m_autosaveMinutes, 0.1f, 0.0f, 60.0f, "%.1f");
                 if (changed) savePrefs();
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Camera bookmarks")) {
+            if (ImGui::BeginMenu(tr("Camera bookmarks"))) {
                 for (int i = 0; i < 9; ++i) {
                     char label[32];
-                    std::snprintf(label, sizeof(label), "Go to %d", i + 1);
+                    std::snprintf(label, sizeof(label), "%s", trf("Go to %d", i + 1).c_str());
                     char key[8];
                     std::snprintf(key, sizeof(key), "%d", i + 1);
                     if (ImGui::MenuItem(label, key, false, m_bookmarks[i].set)) {
@@ -2034,33 +2040,34 @@ void App::drawMenu() {
             }
             int model = static_cast<int>(m_lighting);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
-            if (ImGui::Combo("Lighting model", &model, "PBR\0Toon\0Unlit\0")) setLightingModel(static_cast<LightingModel>(model));
+            if (ImGui::Combo(tr("Lighting model"), &model, "PBR\0Toon\0Unlit\0")) setLightingModel(static_cast<LightingModel>(model));
             ImGui::Separator();
-            if (ImGui::MenuItem("Bake reflection probes", nullptr, false, !bakingProbes() && !m_project.empty())) bakeProbes();
-            if (ImGui::MenuItem("Grading capture", nullptr, false, !m_project.empty())) requestGradingCapture();
+            if (ImGui::MenuItem(tr("Bake reflection probes"), nullptr, false, !bakingProbes() && !m_project.empty())) bakeProbes();
+            if (ImGui::MenuItem(tr("Grading capture"), nullptr, false, !m_project.empty())) requestGradingCapture();
             bool compress = m_assets.compressTextures();
-            if (ImGui::MenuItem("Compress model textures (BC7/BC5)", nullptr, &compress)) {
+            if (ImGui::MenuItem(tr("Compress model textures (BC7/BC5)"), nullptr, &compress)) {
                 m_assets.setCompressTextures(compress);
                 m_assets.reloadAll();
                 m_modelProblems.clear();
                 savePrefs();
             }
-            ImGui::SetItemTooltip("Uses the engine's texture cache (build/cache/textures) and fills it when missing. Off: plain RGBA8");
+            ImGui::SetItemTooltip(tr("Uses the engine's texture cache (build/cache/textures) and fills it when missing. Off: plain RGBA8"));
             ImGui::Separator();
-            ImGui::MenuItem("Play animations", nullptr, &m_playAnims);
-            ImGui::SetItemTooltip("Skinned models loop the clip of their anim field (off: the clip's first frame plus its offset)");
-            if (ImGui::MenuItem("Reset layout")) layoutDocks(ImGui::GetID("MkRenderDock"));
+            ImGui::MenuItem(tr("Play animations"), nullptr, &m_playAnims);
+            ImGui::SetItemTooltip(tr("Skinned models loop the clip of their anim field (off: the clip's first frame plus its offset)"));
+            if (ImGui::MenuItem(tr("Reset layout"))) layoutDocks(ImGui::GetID("MkRenderDock"));
             ImGui::EndMenu();
         }
         if (m_externalChange) {
-            ImGui::TextColored({1.0f, 0.75f, 0.3f, 1.0f}, "   The file changed on disk.");
-            if (ImGui::SmallButton("Reload (drop my edits)")) reloadFromDisk();
-            if (ImGui::SmallButton("Keep mine")) {
+            ImGui::TextColored({1.0f, 0.75f, 0.3f, 1.0f}, tr("   The file changed on disk."));
+            if (ImGui::SmallButton(tr("Reload (drop my edits)"))) reloadFromDisk();
+            if (ImGui::SmallButton(tr("Keep mine"))) {
                 m_externalChange = false;
                 m_fileTime = fileTime(m_path);
             }
         }
         ImGui::TextDisabled("   %s  |  %s", mkrhi::backendName(), m_renderer->adapterName());
+        drawLanguageButton();
         ImGui::EndMainMenuBar();
     }
 
@@ -2121,21 +2128,21 @@ void App::drawMenu() {
 }
 
 void App::drawSaveDialog() {
-    if (m_pendingAction != Pending::None && !ImGui::IsPopupOpen("Unsaved changes") && dirty()) ImGui::OpenPopup("Unsaved changes");
-    if (!ImGui::BeginPopupModal("Unsaved changes", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-    ImGui::Text("%s has unsaved changes.", m_path.empty() ? "The new scene" : utf8Of(pathOf(m_path).filename()).c_str());
-    if (ImGui::Button("Save")) {
+    if (m_pendingAction != Pending::None && !ImGui::IsPopupOpen("###unsaved") && dirty()) ImGui::OpenPopup("###unsaved");
+    if (!ImGui::BeginPopupModal((std::string(tr("Unsaved changes")) + "###unsaved").c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::Text(tr("%s has unsaved changes."), m_path.empty() ? tr("The new scene") : utf8Of(pathOf(m_path).filename()).c_str());
+    if (ImGui::Button(tr("Save"))) {
         if (save()) runPending();
         else m_pendingAction = Pending::None;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Don't save")) {
+    if (ImGui::Button(tr("Don't save"))) {
         runPending();
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (ImGui::Button(tr("Cancel"))) {
         m_pendingAction = Pending::None;
         ImGui::CloseCurrentPopup();
     }
@@ -2153,7 +2160,7 @@ void App::drawAddMenu() {
     }
     if (!anyGame) return;
     ImGui::Separator();
-    ImGui::TextDisabled("Game");
+    ImGui::TextDisabled(tr("Game"));
     for (const KindInfo& k : kinds())
         if (k.game && ImGui::MenuItem(k.label.c_str())) addEntity(k.name);
 }
@@ -2177,8 +2184,8 @@ void App::drawTreeNode(const Entity& e) {
     }
     ImGui::SameLine();
     const KindInfo* kindInfo = findKind(e.kind);
-    ImGui::TextDisabled("%s%s%s", kindInfo && kindInfo->game ? kindInfo->label.c_str() : e.kind.c_str(), m_hidden.count(e.id) ? "  (hidden)" : "",
-                        m_locked.count(e.id) ? "  (locked)" : "");
+    ImGui::TextDisabled("%s%s%s", kindInfo && kindInfo->game ? kindInfo->label.c_str() : e.kind.c_str(), m_hidden.count(e.id) ? tr("  (hidden)") : "",
+                        m_locked.count(e.id) ? tr("  (locked)") : "");
     if (ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload(kDragEntity, &e.id, sizeof(u32));
         ImGui::Text("%s", e.name.c_str());
@@ -2191,13 +2198,13 @@ void App::drawTreeNode(const Entity& e) {
     if (ImGui::BeginPopupContextItem("ctx")) {
         if (!isSelected(e.id)) clickSelect(e.id, false);
         const bool hidden = m_hidden.count(e.id) != 0, locked = m_locked.count(e.id) != 0;
-        if (ImGui::MenuItem(hidden ? "Show" : "Hide", "H")) setHidden(m_selection, !hidden);
-        if (ImGui::MenuItem(locked ? "Unlock" : "Lock (not picked in the view)")) setLocked(m_selection, !locked);
+        if (ImGui::MenuItem(hidden ? tr("Show") : tr("Hide"), "H")) setHidden(m_selection, !hidden);
+        if (ImGui::MenuItem(locked ? tr("Unlock") : tr("Lock (not picked in the view)"))) setLocked(m_selection, !locked);
         ImGui::Separator();
-        if (ImGui::MenuItem("Duplicate", "Ctrl+D")) duplicateSelected();
+        if (ImGui::MenuItem(tr("Duplicate"), "Ctrl+D")) duplicateSelected();
         if (ImGui::MenuItem("Delete", "Del")) deleteSelected();
-        if (e.parent && ImGui::MenuItem("Move to top level")) reparent(e.id, 0);
-        if (ImGui::MenuItem("Frame", "F")) frameSelected();
+        if (e.parent && ImGui::MenuItem(tr("Move to top level"))) reparent(e.id, 0);
+        if (ImGui::MenuItem(tr("Frame"), "F")) frameSelected();
         ImGui::EndPopup();
     }
     const u32 id = e.id; // e may move when the list changes below
@@ -2225,20 +2232,40 @@ bool App::iconButton(const char* glyph, const char* name, const char* detail) {
     return pressed;
 }
 
+void App::drawLanguageButton() {
+    // The name in English too while another language is on, so someone who can't read it still knows the button
+    const std::string name = std::strcmp(language(), "en") == 0 ? std::string("Language") : std::string(tr("Language")) + " (Language)";
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - ImGui::GetFrameHeight()); // the right end, inside the padding
+    if (iconButton(kIconLanguage, name.c_str())) ImGui::OpenPopup("##language");
+    if (ImGui::BeginPopup("##language")) {
+        for (const Language& l : kLanguages) {
+            if (ImGui::MenuItem(l.name, nullptr, std::strcmp(language(), l.code) == 0)) {
+                languageOverride.clear();
+                if (!saveLanguage(l.code)) {
+                    setLanguage(l.code);
+                    log("Cannot save the language to " + mkcontract::userPath(mkcontract::kEditorSettings));
+                }
+            }
+        }
+        ImGui::EndPopup();
+    }
+}
+
 std::string App::panelTitle(const char* glyph, const char* name) const {
-    return (iconFont ? std::string(glyph) + "  " : std::string()) + name + "###" + name;
+    return (iconFont ? std::string(glyph) + "  " : std::string()) + tr(name) + "###" + name;
 }
 
 void App::drawHierarchy() {
     if (ImGui::Begin(panelTitle(kIconTree, "Hierarchy").c_str())) {
-        if (iconButton(kIconAdd, "Add object")) ImGui::OpenPopup("add");
+        if (iconButton(kIconAdd, tr("Add object"))) ImGui::OpenPopup("add");
         if (ImGui::BeginPopup("add")) {
             drawAddMenu();
             ImGui::EndPopup();
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputTextWithHint("##filter", "Search", m_filter, sizeof(m_filter));
+        ImGui::InputTextWithHint("##filter", tr("Search"), m_filter, sizeof(m_filter));
         ImGui::Separator();
         if (ImGui::BeginChild("tree")) {
             const std::string filter = lower(m_filter);
@@ -2303,7 +2330,7 @@ void App::drawFields(Entity& e) {
         ImGui::PushID(static_cast<int>(i));
         const KindField* kf = findKindField(e.kind, key);
         row(kf && !kf->label.empty() ? kf->label.c_str() : key.c_str());
-        if (kf) ImGui::SetItemTooltip("%s\n%s (%s)%s", kf->label.c_str(), key.c_str(), kf->type.c_str(), kf->view ? ", view only" : "");
+        if (kf) ImGui::SetItemTooltip("%s\n%s (%s)%s", kf->label.c_str(), key.c_str(), kf->type.c_str(), kf->view ? tr(", view only") : "");
         ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() - ImGui::GetStyle().ItemSpacing.x);
         f32 number = 0.0f;
         u8 color[4];
@@ -2366,21 +2393,21 @@ void App::drawFields(Entity& e) {
             inputString("##v", value);
         }
         ImGui::SameLine();
-        if (iconButton(kIconRemove, "Remove this field line")) remove = static_cast<int>(i);
+        if (iconButton(kIconRemove, tr("Remove this field line"))) remove = static_cast<int>(i);
         ImGui::PopID();
     }
     if (remove >= 0) e.fields.erase(e.fields.begin() + remove);
     if (const KindInfo* k = findKind(e.kind)) {
         size_t missing = 0;
         for (const KindField& f : k->fields) missing += e.field(f.path).empty() && std::none_of(e.fields.begin(), e.fields.end(), [&](const auto& l) { return l.first == f.path; });
-        if (missing && ImGui::Button(("Add " + std::to_string(missing) + " missing fields with defaults").c_str()))
+        if (missing && ImGui::Button(trf("Add %d missing fields with defaults", static_cast<int>(missing)).c_str()))
             for (const KindField& f : k->fields)
                 if (std::none_of(e.fields.begin(), e.fields.end(), [&](const auto& l) { return l.first == f.path; })) e.fields.push_back({f.path, f.value});
     }
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Add field").x - ImGui::GetStyle().FramePadding.x * 4);
-    ImGui::InputTextWithHint("##newfield", "field name", m_newField, sizeof(m_newField));
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(tr("Add field")).x - ImGui::GetStyle().FramePadding.x * 4);
+    ImGui::InputTextWithHint("##newfield", tr("field name"), m_newField, sizeof(m_newField));
     ImGui::SameLine();
-    if (ImGui::Button("Add field") && m_newField[0] && !std::strchr(m_newField, ' ')) {
+    if (ImGui::Button(tr("Add field")) && m_newField[0] && !std::strchr(m_newField, ' ')) {
         e.setField(m_newField, "");
         m_newField[0] = '\0';
     }
@@ -2390,15 +2417,15 @@ void App::drawInspector() {
     if (ImGui::Begin(panelTitle(kIconInspector, "Inspector").c_str())) {
         Entity* found = m_scene.find(m_selected);
         if (!found) {
-            ImGui::TextDisabled("Select an object in the hierarchy or the viewport.");
-            ImGui::TextDisabled("%zu objects in the scene", m_scene.entities.size());
+            ImGui::TextDisabled(tr("Select an object in the hierarchy or the viewport."));
+            ImGui::TextDisabled(tr("%zu objects in the scene"), m_scene.entities.size());
         } else {
             Entity& e = *found;
-            if (m_selection.size() > 1) ImGui::TextColored({1.0f, 0.8f, 0.4f, 1.0f}, "%zu objects selected (editing the last one; the gizmo moves all)", m_selection.size());
-            ImGui::TextDisabled("id %u", e.id);
-            row("Name");
+            if (m_selection.size() > 1) ImGui::TextColored({1.0f, 0.8f, 0.4f, 1.0f}, tr("%zu objects selected (editing the last one; the gizmo moves all)"), m_selection.size());
+            ImGui::TextDisabled(tr("id %u"), e.id);
+            row(tr("Name"));
             inputString("##name", e.name);
-            row("Kind");
+            row(tr("Kind"));
             const KindInfo* current = findKind(e.kind);
             const std::string kindText = current && current->label != e.kind ? current->label + "  (" + e.kind + ")" : e.kind;
             if (ImGui::BeginCombo("##kind", kindText.c_str())) {
@@ -2409,7 +2436,7 @@ void App::drawInspector() {
                             if (e.field(key).empty()) e.setField(key, value);
                     }
                 ImGui::Separator();
-                ImGui::TextDisabled("Game kind (typed name):");
+                ImGui::TextDisabled(tr("Game kind (typed name):"));
                 static char custom[64];
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
                 if (ImGui::InputText("##custom", custom, sizeof(custom), ImGuiInputTextFlags_EnterReturnsTrue) && std::isalpha(static_cast<unsigned char>(custom[0]))) {
@@ -2419,40 +2446,40 @@ void App::drawInspector() {
                 ImGui::EndCombo();
             }
             if (!findKind(e.kind))
-                ImGui::TextDisabled(m_kindsLoaded ? "Unknown kind: not in the project's object kinds; fields are kept as text."
-                                                  : "Game kind: fields are kept as text (no build/editor/kinds.txt yet: open the project in the editor once, or run <game>_headless --write-kinds).");
+                ImGui::TextDisabled(m_kindsLoaded ? tr("Unknown kind: not in the project's object kinds; fields are kept as text.")
+                                                  : tr("Game kind: fields are kept as text (no build/editor/kinds.txt yet: open the project in the editor once, or run <game>_headless --write-kinds)."));
             if (e.parent) {
                 const Entity* parent = m_scene.find(e.parent);
-                row("Parent");
+                row(tr("Parent"));
                 ImGui::TextUnformatted(parent ? parent->name.c_str() : "?");
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Unparent")) reparent(e.id, 0);
+                if (ImGui::SmallButton(tr("Unparent"))) reparent(e.id, 0);
             } else {
-                row("Folder");
+                row(tr("Folder"));
                 inputString("##folder", e.folder);
             }
 
-            ImGui::SeparatorText("Transform (parent-relative)");
-            row("Position");
+            ImGui::SeparatorText(tr("Transform (parent-relative)"));
+            row(tr("Position"));
             ImGui::DragFloat3("##pos", &e.position.x, 0.05f, 0.0f, 0.0f, "%.3f");
             if (m_eulerFor != e.id) m_euler = toEuler(e.rotation);
-            row("Rotation");
+            row(tr("Rotation"));
             if (ImGui::DragFloat3("##rot", &m_euler.x, 0.5f, 0.0f, 0.0f, "%.1f")) e.rotation = fromEuler(m_euler);
             m_eulerFor = ImGui::IsItemActive() ? e.id : 0;
-            row("Scale");
+            row(tr("Scale"));
             ImGui::DragFloat3("##scale", &e.scale.x, 0.02f, 0.0f, 0.0f, "%.3f");
 
-            ImGui::SeparatorText("Look");
+            ImGui::SeparatorText(tr("Look"));
             const KindInfo* info = findKind(e.kind);
             const bool modelKind = !info || (!info->marker && !info->area && !e.is(kKindTerrain) && !e.is(kKindScatter) && !e.is(kKindSprite));
             if (modelKind) {
-                row("Model");
-                if (ImGui::BeginCombo("##model", e.model.empty() ? "(box)" : e.model.c_str(), ImGuiComboFlags_HeightLarge)) {
+                row(tr("Model"));
+                if (ImGui::BeginCombo("##model", e.model.empty() ? tr("(box)") : e.model.c_str(), ImGuiComboFlags_HeightLarge)) {
                     static char search[64];
                     if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
                     ImGui::SetNextItemWidth(-1);
-                    ImGui::InputTextWithHint("##search", "Search", search, sizeof(search));
-                    if (ImGui::Selectable("(box)", e.model.empty())) e.model.clear();
+                    ImGui::InputTextWithHint("##search", tr("Search"), search, sizeof(search));
+                    if (ImGui::Selectable(tr("(box)"), e.model.empty())) e.model.clear();
                     const std::string s = lower(search);
                     for (const std::string& m : m_assets.modelFiles())
                         if ((s.empty() || lower(m).find(s) != std::string::npos) && ImGui::Selectable(m.c_str(), m == e.model)) e.model = m;
@@ -2460,17 +2487,17 @@ void App::drawInspector() {
                 }
                 if (!e.model.empty()) {
                     const ModelEntry& m = m_assets.model(e.model);
-                    if (m.ok) ImGui::TextDisabled("%u triangles, %u materials, %u textures", m.triangles, m.materials, m.textures);
+                    if (m.ok) ImGui::TextDisabled(tr("%u triangles, %u materials, %u textures"), m.triangles, m.materials, m.textures);
                     else ImGui::TextColored({1.0f, 0.5f, 0.4f, 1.0f}, "%s", m.error.c_str());
                     for (const std::string& w : m.warnings) ImGui::TextDisabled("%s", w.c_str());
                 }
             }
             f32 c[4];
             colorToFloats(e.color, c);
-            row("Color");
+            row(tr("Color"));
             if (ImGui::ColorEdit4("##color", c, ImGuiColorEditFlags_AlphaPreviewHalf)) e.color = floatsToColor(c);
             bool checker = (e.flags & kInstanceChecker) != 0;
-            row("Checker");
+            row(tr("Checker"));
             if (checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
             if (e.is(kKindScatter) || e.is(kKindTerrain)) drawBrushInspector(e);
             if (!e.model.empty()) {
@@ -2478,27 +2505,27 @@ void App::drawInspector() {
                 if (m.ok && m.skinned()) {
                     std::string anim = e.field("anim");
                     const std::string clipName = anim.substr(0, anim.find(' '));
-                    row("Clip");
-                    if (ImGui::BeginCombo("##clip", clipName.empty() ? "(rest pose)" : clipName.c_str())) {
-                        if (ImGui::Selectable("(rest pose)", clipName.empty())) e.setField("anim", "");
+                    row(tr("Clip"));
+                    if (ImGui::BeginCombo("##clip", clipName.empty() ? tr("(rest pose)") : clipName.c_str())) {
+                        if (ImGui::Selectable(tr("(rest pose)"), clipName.empty())) e.setField("anim", "");
                         for (const AnimationClip& c : m.clips)
                             if (ImGui::Selectable(c.name.c_str(), c.name == clipName))
                                 e.setField("anim", c.name + (anim.find(' ') != std::string::npos ? anim.substr(anim.find(' ')) : std::string()));
                         ImGui::EndCombo();
                     }
-                    ImGui::SetItemTooltip("The anim field (\"<clip> [offset seconds]\"), played in a loop like in the game view");
+                    ImGui::SetItemTooltip(tr("The anim field (\"<clip> [offset seconds]\"), played in a loop like in the game view"));
                 }
             }
-            if (e.is(kKindTerrain)) ImGui::TextDisabled("The heightmap fills the object's box (scale).");
+            if (e.is(kKindTerrain)) ImGui::TextDisabled(tr("The heightmap fills the object's box (scale)."));
             if (e.is(kKindProbe)) {
                 ImGui::BeginDisabled(bakingProbes() || m_project.empty());
-                if (ImGui::Button("Bake this probe")) bakeProbes(e.id);
+                if (ImGui::Button(tr("Bake this probe"))) bakeProbes(e.id);
                 ImGui::EndDisabled();
                 ImGui::SameLine();
-                ImGui::TextDisabled(e.field("bake").empty() ? "not baked" : "box = influence area");
+                ImGui::TextDisabled(e.field("bake").empty() ? tr("not baked") : tr("box = influence area"));
             }
 
-            ImGui::SeparatorText("Fields");
+            ImGui::SeparatorText(tr("Fields"));
             drawFields(e);
         }
     }
@@ -2508,24 +2535,24 @@ void App::drawInspector() {
 void App::drawEnvironment() {
     if (ImGui::Begin(panelTitle(kIconBrightness, "Environment").c_str())) {
         Environment& env = m_scene.environment;
-        ImGui::SeparatorText("Sun");
+        ImGui::SeparatorText(tr("Sun"));
         const Vec3 d = normalize(env.sunDirection);
         f32 azimuth = std::atan2(d.x, d.z) / kDeg, elevation = std::asin(std::clamp(d.y, -1.0f, 1.0f)) / kDeg;
-        row("Azimuth");
-        bool sun = ImGui::SliderFloat("##az", &azimuth, -180.0f, 180.0f, "%.1f deg");
-        row("Elevation");
-        sun |= ImGui::SliderFloat("##el", &elevation, -10.0f, 90.0f, "%.1f deg");
+        row(tr("Azimuth"));
+        bool sun = ImGui::SliderFloat("##az", &azimuth, -180.0f, 180.0f, tr("%.1f deg"));
+        row(tr("Elevation"));
+        sun |= ImGui::SliderFloat("##el", &elevation, -10.0f, 90.0f, tr("%.1f deg"));
         if (sun) env.sunDirection = {std::cos(elevation * kDeg) * std::sin(azimuth * kDeg), std::sin(elevation * kDeg), std::cos(elevation * kDeg) * std::cos(azimuth * kDeg)};
-        row("Sun color");
+        row(tr("Sun color"));
         ImGui::ColorEdit3("##suncolor", &env.sunColor.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
-        ImGui::SeparatorText("Sky and fog (linear)");
-        row("Sky");
+        ImGui::SeparatorText(tr("Sky and fog (linear)"));
+        row(tr("Sky"));
         ImGui::ColorEdit3("##sky", &env.skyColor.x, ImGuiColorEditFlags_Float);
-        row("Ground");
+        row(tr("Ground"));
         ImGui::ColorEdit3("##ground", &env.groundColor.x, ImGuiColorEditFlags_Float);
-        row("Fog color");
+        row(tr("Fog color"));
         ImGui::ColorEdit3("##fog", &env.fogColor.x, ImGuiColorEditFlags_Float);
-        row("Fog density");
+        row(tr("Fog density"));
         ImGui::DragFloat("##fogd", &env.fogDensity, 0.0002f, 0.0f, 1.0f, "%.4f");
         // A file picker over the project's files of one kind (assets/textures/**.hdr, assets/lut/**.cube) plus free text
         const auto filePicker = [&](const char* id, std::string& value, const char* extension, const char* folder) {
@@ -2534,37 +2561,37 @@ void App::drawEnvironment() {
             changed |= inputString(id, value);
             ImGui::SameLine();
             if (ImGui::BeginCombo((std::string(id) + "pick").c_str(), nullptr, ImGuiComboFlags_NoPreview | ImGuiComboFlags_PopupAlignLeft)) {
-                if (ImGui::Selectable("(none)", value.empty())) value.clear(), changed = true;
+                if (ImGui::Selectable(tr("(none)"), value.empty())) value.clear(), changed = true;
                 for (const std::string& f : m_assets.files(extension))
                     if (f.rfind(folder, 0) == 0 && ImGui::Selectable(f.c_str(), f == value)) value = f, changed = true;
                 ImGui::EndCombo();
             }
             return changed;
         };
-        ImGui::SeparatorText("Sky HDRI");
-        row("HDRI file");
+        ImGui::SeparatorText(tr("Sky HDRI"));
+        row(tr("HDRI file"));
         filePicker("##hdri", env.hdri, ".hdr", "textures/");
         if (!env.hdri.empty()) {
-            row("Intensity");
+            row(tr("Intensity"));
             ImGui::DragFloat("##hdrii", &env.hdriIntensity, 0.01f, 0.0f, 16.0f);
-            row("Rotation");
-            ImGui::DragFloat("##hdrir", &env.hdriRotation, 0.5f, -360.0f, 360.0f, "%.1f deg");
-            if (!m_environmentId) ImGui::TextDisabled("Not loaded (see the log): the sky/ground colors are shown.");
-            else ImGui::TextDisabled("Baked once into build/cache/environments (the engine reads the same file).");
+            row(tr("Rotation"));
+            ImGui::DragFloat("##hdrir", &env.hdriRotation, 0.5f, -360.0f, 360.0f, tr("%.1f deg"));
+            if (!m_environmentId) ImGui::TextDisabled(tr("Not loaded (see the log): the sky/ground colors are shown."));
+            else ImGui::TextDisabled(tr("Baked once into build/cache/environments (the engine reads the same file)."));
         }
-        ImGui::SeparatorText("Reflection probes");
+        ImGui::SeparatorText(tr("Reflection probes"));
         u32 probes = 0, baked = 0;
         for (const Entity& e : m_scene.entities)
             if (e.is(kKindProbe)) ++probes, baked += e.field("bake").empty() ? 0u : 1u;
-        ImGui::Text("%u in the scene, %u baked, %u drawn", probes, baked, static_cast<u32>(m_probeList.size()));
+        ImGui::Text(tr("%u in the scene, %u baked, %u drawn"), probes, baked, static_cast<u32>(m_probeList.size()));
         ImGui::BeginDisabled(probes == 0 || bakingProbes() || m_project.empty());
-        if (ImGui::Button("Bake probes")) bakeProbes();
+        if (ImGui::Button(tr("Bake probes"))) bakeProbes();
         ImGui::EndDisabled();
         if (bakingProbes()) {
             ImGui::SameLine();
-            ImGui::TextDisabled("%u left", static_cast<u32>(m_probeQueue.size()));
+            ImGui::TextDisabled(tr("%u left"), static_cast<u32>(m_probeQueue.size()));
         }
-        ImGui::SeparatorText("Post-processing");
+        ImGui::SeparatorText(tr("Post-processing"));
         const auto boolRow = [&](const char* key, const char* label) {
             bool on = env.postValue(key) != "false";
             row(label);
@@ -2576,27 +2603,27 @@ void App::drawEnvironment() {
             row(label);
             if (ImGui::SliderFloat((std::string("##") + key).c_str(), &v, lo, hi, "%.3f")) env.setPost(key, floatText(v));
         };
-        boolRow("toneMapping", "Tone mapping");
-        boolRow("punchy", "Punchy look");
-        floatRow("exposure", "Exposure", -4.0f, 4.0f);
-        floatRow("bloomIntensity", "Bloom", 0.0f, 1.0f);
-        floatRow("bloomThreshold", "Bloom threshold", 0.0f, 8.0f);
+        boolRow("toneMapping", tr("Tone mapping"));
+        boolRow("punchy", tr("Punchy look"));
+        floatRow("exposure", tr("Exposure"), -4.0f, 4.0f);
+        floatRow("bloomIntensity", tr("Bloom"), 0.0f, 1.0f);
+        floatRow("bloomThreshold", tr("Bloom threshold"), 0.0f, 8.0f);
         Vec3 tint{1, 1, 1};
         parseVec3(env.postValue("bloomTint"), tint);
-        row("Bloom tint");
+        row(tr("Bloom tint"));
         if (ImGui::ColorEdit3("##tint", &tint.x, ImGuiColorEditFlags_Float)) env.setPost("bloomTint", floatsText(&tint.x, 3));
-        floatRow("vignette", "Vignette", 0.0f, 1.0f);
-        floatRow("vignetteSmoothness", "Vignette start", 0.0f, 1.0f);
-        floatRow("grain", "Film grain", 0.0f, 1.0f);
-        floatRow("chromaticAberration", "Chromatic aberr.", 0.0f, 0.03f);
+        floatRow("vignette", tr("Vignette"), 0.0f, 1.0f);
+        floatRow("vignetteSmoothness", tr("Vignette start"), 0.0f, 1.0f);
+        floatRow("grain", tr("Film grain"), 0.0f, 1.0f);
+        floatRow("chromaticAberration", tr("Chromatic aberr."), 0.0f, 0.03f);
         std::string lut = env.postValue("lut");
-        row("Color LUT");
+        row(tr("Color LUT"));
         if (filePicker("##lut", lut, ".cube", "lut/")) env.setPost("lut", lut);
         ImGui::BeginDisabled(m_project.empty());
-        if (iconButton(kIconCamera, "Grading capture", "The view without LUT to art/grading, to grade in an image editor")) requestGradingCapture();
+        if (iconButton(kIconCamera, tr("Grading capture"), tr("The view without LUT to art/grading, to grade in an image editor"))) requestGradingCapture();
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Saves the view without the LUT to art/grading/<scene>.png with a neutral.cube beside it:\n"
-                              "grade both in Resolve or Photoshop, export a .cube into assets/lut and pick it here.");
+        // One literal: the translation table and its test match whole strings
+        ImGui::SetItemTooltip("%s", tr("Saves the view without the LUT to art/grading/<scene>.png with a neutral.cube beside it:\ngrade both in Resolve or Photoshop, export a .cube into assets/lut and pick it here."));
     }
     ImGui::End();
 }
@@ -2604,11 +2631,11 @@ void App::drawEnvironment() {
 void App::drawStats() {
     if (ImGui::Begin(panelTitle(kIconPerformance, "Stats").c_str())) {
         const RenderStats& s = m_renderer->stats();
-        ImGui::Text("%.0f fps, %u draw calls, %u instances", m_fps, s.drawCalls, s.instances);
-        if (s.gpuValid) ImGui::Text("GPU %.2f ms (opaque %.2f, shadow %.2f, post %.2f)", s.gpuFrameMs, s.gpuPassMs[0], s.gpuPassMs[1], s.gpuPassMs[2]);
+        ImGui::Text(tr("%.0f fps, %u draw calls, %u instances"), m_fps, s.drawCalls, s.instances);
+        if (s.gpuValid) ImGui::Text(tr("GPU %.2f ms (opaque %.2f, shadow %.2f, post %.2f)"), s.gpuFrameMs, s.gpuPassMs[0], s.gpuPassMs[1], s.gpuPassMs[2]);
         bool vsync = m_renderer->vsync();
-        if (checkbox("VSync", &vsync)) m_renderer->setVsync(vsync);
-        ImGui::SeparatorText("Log");
+        if (checkbox(tr("VSync"), &vsync)) m_renderer->setVsync(vsync);
+        ImGui::SeparatorText(tr("Log"));
         if (ImGui::BeginChild("log", {0, 0}, ImGuiChildFlags_Borders)) {
             for (const std::string& w : m_warnings) ImGui::TextColored({1.0f, 0.75f, 0.3f, 1.0f}, "%s", w.c_str());
             for (const std::string& line : m_log) ImGui::TextUnformatted(line.c_str());
@@ -2928,38 +2955,38 @@ void App::savePrefab(const std::string& name) {
 
 void App::drawAssets() {
     if (m_prefabPopup) {
-        ImGui::OpenPopup("Save prefab");
+        ImGui::OpenPopup("###saveprefab");
         m_prefabPopup = false;
         if (!m_prefabName[0]) {
             const Entity* e = m_scene.find(m_selected);
             std::snprintf(m_prefabName, sizeof(m_prefabName), "%s", e ? e->name.c_str() : "prefab");
         }
     }
-    if (ImGui::BeginPopupModal("Save prefab", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Saves the %zu selected objects (with their children) to assets/prefabs/<name>.prefab", selectedRoots().size());
+    if (ImGui::BeginPopupModal((std::string(tr("Save prefab")) + "###saveprefab").c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(tr("Saves the %zu selected objects (with their children) to assets/prefabs/<name>.prefab"), selectedRoots().size());
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        const bool enter = ImGui::InputText("Name", m_prefabName, sizeof(m_prefabName), ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool enter = ImGui::InputText(tr("Name"), m_prefabName, sizeof(m_prefabName), ImGuiInputTextFlags_EnterReturnsTrue);
         const bool valid = m_prefabName[0] && !std::strpbrk(m_prefabName, "\\/:*?\"<>|");
         ImGui::BeginDisabled(!valid);
-        if (ImGui::Button("Save") || (enter && valid)) {
+        if (ImGui::Button(tr("Save")) || (enter && valid)) {
             savePrefab(m_prefabName);
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        if (ImGui::Button(tr("Cancel"))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
     if (ImGui::Begin(panelTitle(kIconFolder, "Assets").c_str())) {
         if (m_assets.assetsDir().empty()) {
-            ImGui::TextDisabled("Open a project to see its assets.");
+            ImGui::TextDisabled(tr("Open a project to see its assets."));
         } else {
-            if (iconButton(kIconRefresh, "Rescan")) m_assets.rescan();
+            if (iconButton(kIconRefresh, tr("Rescan"))) m_assets.rescan();
             ImGui::SameLine();
-            if (checkbox("Pictures", &m_showThumbs)) savePrefs();
+            if (checkbox(tr("Pictures"), &m_showThumbs)) savePrefs();
             ImGui::SameLine();
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::InputTextWithHint("##assetfilter", "Search assets", m_assetFilter, sizeof(m_assetFilter));
+            ImGui::InputTextWithHint("##assetfilter", tr("Search assets"), m_assetFilter, sizeof(m_assetFilter));
             const std::string filter = lower(m_assetFilter);
             if (ImGui::BeginTabBar("assetTabs")) {
                 const auto list = [&](const char* tab, const char* ext, const char* hint) {
@@ -2997,13 +3024,13 @@ void App::drawAssets() {
                             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) placeAsset(f, m_pivot);
                             if (ImGui::BeginDragDropSource()) {
                                 ImGui::SetDragDropPayload(kDragAsset, f.data(), f.size());
-                                ImGui::Text("Place %s", f.c_str());
+                                ImGui::Text(tr("Place %s"), f.c_str());
                                 ImGui::EndDragDropSource();
                             }
                             if (ImGui::BeginPopupContextItem("assetctx")) {
-                                if (ImGui::MenuItem("Place at the view center")) placeAsset(f, m_pivot);
-                                if (ImGui::MenuItem("Find uses in this scene")) findUses(f);
-                                if (ImGui::MenuItem("Copy path")) ImGui::SetClipboardText(f.c_str());
+                                if (ImGui::MenuItem(tr("Place at the view center"))) placeAsset(f, m_pivot);
+                                if (ImGui::MenuItem(tr("Find uses in this scene"))) findUses(f);
+                                if (ImGui::MenuItem(tr("Copy path"))) ImGui::SetClipboardText(f.c_str());
                                 ImGui::EndPopup();
                             }
                             ImGui::PopID();
@@ -3014,10 +3041,10 @@ void App::drawAssets() {
                     ImGui::EndChild();
                     ImGui::EndTabItem();
                 };
-                list("Models", ".glb", "Drag into the view to place, double-click places at the view center");
-                list("Prefabs", ".prefab", "Placed as plain copies (Edit > Save selection as prefab makes one)");
-                list("Images", ".png", "Placed as sprites");
-                list("Scenes", ".scene", "Double-click opens");
+                list(tr("Models"), ".glb", tr("Drag into the view to place, double-click places at the view center"));
+                list(tr("Prefabs"), ".prefab", tr("Placed as plain copies (Edit > Save selection as prefab makes one)"));
+                list(tr("Images"), ".png", tr("Placed as sprites"));
+                list(tr("Scenes"), ".scene", tr("Double-click opens"));
                 ImGui::EndTabBar();
             }
         }

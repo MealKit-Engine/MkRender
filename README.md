@@ -117,6 +117,8 @@ build.bat                     # Windows: DX12, Release, Ninja; runs the tests (m
 cmake -S . -B build && cmake --build build && ctest --test-dir build
 ```
 
+The tests include render goldens without the engine (`tests/GoldenTest.cpp`, Windows): `mkrender_golden` opens a hidden window, draws four fixed scenes made in code (PBR, toon and unlit lighting with shadows, point lights, an outline, bloom, particles and a UI panel; a 2D front view with sprites for layer order, blending, flips, point and linear sampling and a sheet cell) and compares each with `tests/golden/<shot>.png` like the engine's graphics regression test (a channel more than 8 apart makes a pixel off, at most 0.5% off). DX12 and Vulkan compare against the same images. On a difference it writes the image and a `-diff.png` (red = off) to `<build>/golden/`; `mkrender_golden --update` replaces the references after a change made on purpose. Without a GPU (CI) it prints SKIP and passes.
+
 Options for a host project that adds it with `add_subdirectory`:
 
 | Variable | Meaning |

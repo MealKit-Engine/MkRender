@@ -3,7 +3,7 @@
 Only work that is left. When an item is done, remove it here and describe it in the engine's `docs/CHANGELOG.md` under the item's name (MkRender versions are in `git log`).
 Sources: engine `docs/ROADMAP.md` "Scene editing in MkRender, leftovers", "MkRender leftovers" and "Design refresh for the rest of the suite"; engine `docs/TOOL_DESIGN.md` sections 6 and 7.
 
-**Suggested order**: 1 (look, small and visible every day) → 3 → 4; 2 when the engine has flipbook clips.
+**Suggested order**: 1, then 3; 2 when the engine has flipbook clips.
 
 ## 1. Suite look (engine TOOL_DESIGN section 6 checklist)
 
@@ -15,10 +15,6 @@ MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title 
 
 - [ ] With the engine's flipbook clips (engine ROADMAP "2D on the 3D engine"): previewing a clip on the selected sprite.
 
-## 3. Render goldens without the engine (engine ROADMAP "MkRender leftovers")
+## 3. Later
 
-- [ ] A test in `tests/` that opens a hidden window, renders a fixed scene from plain meshes and compares it like `engine/tests/golden`; `--frames N --capture` and `--render-golden` are the start. DX12 and Vulkan both (`build-vulkan\`).
-
-## 4. Later
-
-- [ ] Publishing MkRender as a product of its own: decided after 3 (engine `docs/DECISIONS.md` 2026-11-12).
+- [ ] Publishing MkRender as a product of its own: to decide now that its render goldens run without the engine (engine `docs/DECISIONS.md` 2026-11-12).

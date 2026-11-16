@@ -74,8 +74,10 @@ VSOutput VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
     float margin = q.softness * 2.0 + 1.0; // half pixel outside the border + shadow blur
     float2 half = q.rect.zw * 0.5;
     float2 local = lerp(-half - margin, half + margin, c);
+    float shear = float(asint(q.flags) >> 16) / 10000.0; // flags 16-31: italic shear (mkui::quadShear); the pixel shader works unsheared
+    float2 sheared = float2(local.x - shear * local.y, local.y);
     float s = sin(q.rotation), co = cos(q.rotation);
-    float2 rotated = float2(local.x * co - local.y * s, local.x * s + local.y * co);
+    float2 rotated = float2(sheared.x * co - sheared.y * s, sheared.x * s + sheared.y * co);
     float2 pixel = q.rect.xy + half + rotated;
     VSOutput o;
     o.position = float4(pixel.x / pc.screenSize.x * 2.0 - 1.0, 1.0 - pixel.y / pc.screenSize.y * 2.0, 0.0, 1.0);

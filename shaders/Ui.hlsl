@@ -116,8 +116,15 @@ float4 PSMain(VSOutput input) : SV_Target
     {
         float2 uv = lerp(q.uv.xy, q.uv.zw, box01);
         float s = g_textures[pc.glyphAtlas].SampleLevel(g_linearClamp, uv, 0).r;
-        float a = saturate((s - 0.5) * q.sdfScale + 0.5);
+        float inside = (s - 0.5) * q.sdfScale; // screen px inside the edge
+        float a = saturate(inside + 0.5);
         float4 c = unpack(q.color0);
+        if (q.strokeWidth > 0.0) // outline (mkui text `outline`): strokeWidth screen px outside the edge in strokeColor
+        {
+            float o = saturate(inside + 0.5 + q.strokeWidth) - a;
+            float4 k = unpack(q.strokeColor);
+            return float4(c.rgb * c.a * a + k.rgb * k.a * o, c.a * a + k.a * o);
+        }
         return float4(c.rgb, 1.0) * (c.a * a);
     }
 

@@ -134,7 +134,13 @@ float4 PSMain(VSOutput input) : SV_Target
     if (kind == 1) // image (multiplied by color)
     {
         float2 uv = lerp(q.uv.xy, q.uv.zw, box01);
-        fill = g_textures[pc.imageAtlas].SampleLevel(g_linearClamp, uv, 0) * unpack(q.color0);
+        float4 tint = unpack(q.color0);
+        if (((q.flags >> 4) & 0x3) == 1) // linear: the tint runs from color0 to strokeColor (mkui gradientField)
+        {
+            float2 a = q.gradient.xy, ab = q.gradient.zw - q.gradient.xy;
+            tint = lerp(tint, unpack(q.strokeColor), saturate(dot(box01 - a, ab) / max(dot(ab, ab), 1e-6)));
+        }
+        fill = g_textures[pc.imageAtlas].SampleLevel(g_linearClamp, uv, 0) * tint;
         float4 bright = unpack(q.color1); // brightness: toward white or black by its alpha
         fill.rgb = lerp(fill.rgb, bright.rgb, bright.a);
     }

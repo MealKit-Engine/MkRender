@@ -24,6 +24,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <X11/Xlib.h>
 #endif
 
 // Static stb copies (PNG only) like mkterrain's, so they don't clash with anything linked
@@ -365,7 +367,8 @@ double comparePixels(const Image& golden, const Image& actual, Image& diff) {
 }
 
 #ifdef _WIN32
-HWND makeHiddenWindow() {
+using NativeWindow = HWND;
+NativeWindow makeHiddenWindow() {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = DefWindowProcW;
@@ -378,24 +381,53 @@ HWND makeHiddenWindow() {
     return CreateWindowExW(0, wc.lpszClassName, L"mkrender_golden", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left,
                            rect.bottom - rect.top, nullptr, nullptr, wc.hInstance, nullptr); // never shown
 }
+void* windowHandle(NativeWindow window) { return window; }
+void destroyWindow(NativeWindow window) { DestroyWindow(window); }
+void pumpMessages(NativeWindow) {
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+}
+#else
+// Linux (X11): a window that is never mapped; the Vulkan swap chain takes the surface's size, the window's size
+struct NativeWindow {
+    Display* display = nullptr;
+    Window window = 0;
+    mkrhi::XlibWindow handle;
+    explicit operator bool() const { return window != 0; }
+};
+NativeWindow makeHiddenWindow() {
+    NativeWindow result;
+    result.display = XOpenDisplay(nullptr);
+    if (!result.display) return result;
+    const int screen = DefaultScreen(result.display);
+    result.window = XCreateSimpleWindow(result.display, RootWindow(result.display, screen), 0, 0, kWidth, kHeight, 0, 0, 0);
+    XFlush(result.display);
+    result.handle.display = result.display;
+    result.handle.window = result.window;
+    return result;
+}
+void* windowHandle(NativeWindow& window) { return &window.handle; }
+void pumpMessages(NativeWindow& window) {
+    if (window.display) XFlush(window.display);
+}
+void destroyWindow(NativeWindow& window) {
+    if (!window.display) return;
+    if (window.window) XDestroyWindow(window.display, window.window);
+    XCloseDisplay(window.display);
+}
 #endif
 
 } // namespace
 
 int main(int argc, char** argv) {
     const bool update = argc > 1 && std::strcmp(argv[1], "--update") == 0;
-#ifndef _WIN32
-    (void)update;
-    std::printf("SKIP mkrender_golden: Windows only for now\n");
-    return 0;
-#else
     mkrhi::setLog([](mkrhi::LogLevel level, const char* text, void*) {
         if (level != mkrhi::LogLevel::Info) std::printf("[rhi] %s\n", text);
     });
-    HWND window = makeHiddenWindow();
+    NativeWindow window = makeHiddenWindow();
     Renderer renderer;
     RendererDesc desc;
-    desc.window = window;
+    desc.window = windowHandle(window);
     desc.width = kWidth;
     desc.height = kHeight;
     desc.vsync = false;
@@ -419,8 +451,7 @@ int main(int argc, char** argv) {
         renderer.setLightingModel(shot.lighting);
         captured = {};
         for (int frame = 0; frame < kFrames; ++frame) {
-            MSG msg;
-            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+            pumpMessages(window);
             list.clear();
             if (shot.sprites) fillSprites(list, ids);
             else fill3d(list, ids);
@@ -471,9 +502,8 @@ int main(int argc, char** argv) {
         }
     }
     renderer.shutdown();
-    DestroyWindow(window);
+    destroyWindow(window);
     std::printf("%s: %d shots, %d failures%s\n", failures ? "FAIL" : "OK", static_cast<int>(sizeof(kShots) / sizeof(kShots[0])), failures,
                 failures && !update ? (" (images in " + outDir.string() + ")").c_str() : "");
     return failures ? 1 : 0;
-#endif
 }

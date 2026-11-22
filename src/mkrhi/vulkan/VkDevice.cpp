@@ -178,7 +178,11 @@ VkInstance createInstance(bool withSurface, bool validation, bool* debugUtils) {
     std::vector<const char*> extensions;
     if (withSurface) {
         extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+#if defined(_WIN32)
         extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+#elif defined(__linux__)
+        extensions.push_back("VK_KHR_xlib_surface");
+#endif
     }
     std::vector<const char*> layers;
     *debugUtils = false;
@@ -394,7 +398,7 @@ bool Device::init(const DeviceDesc& desc) {
         return false;
     };
 
-    if (volkInitialize() != VK_SUCCESS) return fail("Vulkan is not available (vulkan-1.dll not found). Update the GPU driver.");
+    if (volkInitialize() != VK_SUCCESS) return fail("Vulkan is not available (" MKRHI_VULKAN_LOADER " not found). Update the GPU driver.");
     if (volkGetInstanceVersion() < VK_API_VERSION_1_3)
         return fail("Vulkan 1.3 is required, but the Vulkan loader is " + versionText(volkGetInstanceVersion()) +
                     ". Update the GPU driver.");
@@ -409,10 +413,31 @@ bool Device::init(const DeviceDesc& desc) {
         vkCreateDebugUtilsMessengerEXT(m->instance, &mi, nullptr, &m->messenger);
     }
 
+#if defined(_WIN32)
     VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     si.hwnd = static_cast<HWND>(desc.window);
     si.hinstance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(si.hwnd, GWLP_HINSTANCE));
     VK(vkCreateWin32SurfaceKHR(m->instance, &si, nullptr, &m->surface));
+#elif defined(__linux__)
+    // VK_KHR_xlib_surface without vulkan_xlib.h: Xlib's macros (None, Always, Bool) would collide with mkrhi names
+    struct XlibSurfaceCreateInfo {
+        VkStructureType sType;
+        const void* pNext;
+        VkFlags flags;
+        void* dpy;
+        unsigned long window;
+    };
+    using CreateXlibSurface = VkResult(VKAPI_PTR*)(VkInstance, const XlibSurfaceCreateInfo*, const VkAllocationCallbacks*,
+                                                   VkSurfaceKHR*);
+    const auto* xlib = static_cast<const XlibWindow*>(desc.window);
+    const auto createSurface =
+        reinterpret_cast<CreateXlibSurface>(vkGetInstanceProcAddr(m->instance, "vkCreateXlibSurfaceKHR"));
+    if (!xlib || !xlib->display || !createSurface) return fail("Vulkan X11 surface support (VK_KHR_xlib_surface) is missing");
+    const XlibSurfaceCreateInfo si{VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR, nullptr, 0, xlib->display, xlib->window};
+    VK(createSurface(m->instance, &si, nullptr, &m->surface));
+#else
+    return fail("Vulkan surfaces aren't implemented on this OS");
+#endif
 
     std::string missing;
     m->physical = pickDevice(m->instance, m->surface, &missing);
@@ -1422,7 +1447,7 @@ std::string gpuMinimumError(const GpuInfo& info) { return info.unsupported; }
 
 bool queryGpu(GpuInfo& out, std::string* error) {
     if (volkInitialize() != VK_SUCCESS) {
-        if (error) *error = "Vulkan is not available (vulkan-1.dll not found)";
+        if (error) *error = "Vulkan is not available (" MKRHI_VULKAN_LOADER " not found)";
         return false;
     }
     bool debugUtils = false;

@@ -147,8 +147,14 @@ struct PipelineDesc {
     bool depthWrite = true; // doesn't write even when depth testing (translucent particles)
 };
 
+// Linux (X11) window for DeviceDesc::window: the host's Display* and Window, without Xlib headers here
+struct XlibWindow {
+    void* display = nullptr;
+    unsigned long window = 0;
+};
+
 struct DeviceDesc {
-    void* window = nullptr; // native window handle (HWND on Windows)
+    void* window = nullptr; // native window handle: HWND on Windows, XlibWindow* on Linux (X11)
     u32 width = 0;
     u32 height = 0;
     bool debug = false; // validation layer (DX12 debug layer, Vulkan validation)

@@ -41,6 +41,10 @@ if(WIN32)
 endif()
 
 install(TARGETS MkRender RUNTIME DESTINATION .)
+# Icon font (engine docs/TOOL_DESIGN.md section 2): read from beside the executable, so it is copied there and installed with it
+add_custom_command(TARGET MkRender POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/fluent-icons/FluentSystemIcons-Regular.ttf $<TARGET_FILE_DIR:MkRender>)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/fluent-icons/FluentSystemIcons-Regular.ttf DESTINATION .)
 
 # Every tr() text of the app has its Korean line (engine docs/TOOL_DESIGN.md section 4)
 if(MKRENDER_BUILD_TESTS)

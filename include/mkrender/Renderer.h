@@ -222,7 +222,7 @@ using ShaderReloadAdd = std::function<void(const char* file, const char* vsEntry
 using CaptureFn = void (*)(const Image& image, void* user);
 
 struct RendererDesc {
-    void* window = nullptr; // native window handle (HWND on Windows)
+    void* window = nullptr; // native window handle (HWND on Windows, mkrhi::XlibWindow* on Linux)
     u32 width = 0;
     u32 height = 0;
     bool vsync = true;

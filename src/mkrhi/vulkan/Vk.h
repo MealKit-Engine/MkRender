@@ -1,10 +1,16 @@
 #pragma once
 
 // Vulkan backend internals (only rhi/vulkan/ files include this). Vulkan 1.3 + descriptor indexing + dynamic rendering + synchronization2.
-// Built without the SDK: headers in third_party/vulkan-headers, the loader (vulkan-1.dll) loaded at runtime by volk, memory via VMA.
+// Built without the SDK: headers in third_party/vulkan-headers, the loader (vulkan-1.dll, libvulkan.so.1) loaded at runtime by volk, memory via VMA.
 #include "mkrhi/Rhi.h"
 
 #include <volk.h>
+
+#if defined(_WIN32)
+#define MKRHI_VULKAN_LOADER "vulkan-1.dll"
+#else
+#define MKRHI_VULKAN_LOADER "libvulkan.so.1"
+#endif
 #include <vk_mem_alloc.h>
 
 namespace mkrhi {

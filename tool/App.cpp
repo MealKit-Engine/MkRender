@@ -31,40 +31,40 @@ constexpr u32 kSheetSize = 256; // sprite slicer picture (pixels)
 constexpr u32 kLookSize = 768;  // Look Dev image (pixels, square)
 constexpr const char* kDragEntity = "MKR_ENTITY";
 constexpr const char* kDragAsset = "MKR_ASSET";
-// Glyphs from engine docs/TOOL_DESIGN.md section 2 (Segoe Fluent Icons / MDL2 Assets)
-constexpr const char* kIconAdd = "\xEE\x9C\x90";     // U+E710
-constexpr const char* kIconRemove = "\xEE\x9C\xB8";  // U+E738 remove from a list
-constexpr const char* kIconRefresh = "\xEE\x9C\xAC"; // U+E72C
-constexpr const char* kIconPlay = "\xEE\x9D\xA8";    // U+E768
-constexpr const char* kIconCamera = "\xEE\x9C\xA2";  // U+E722 capture
-constexpr const char* kIconClear = "\xEE\xA2\x94";   // U+E894
-constexpr const char* kIconOpenFile = "\xEE\xA3\xA5";    // U+E8E5 open a scene file
-constexpr const char* kIconOpenProject = "\xEE\xA2\xB7"; // U+E8B7 Folder: open a project folder
-constexpr const char* kIconCopy = "\xEE\xA3\x88";        // U+E8C8 copy, duplicate
-constexpr const char* kIconDelete = "\xEE\x9D\x8D";      // U+E74D
-constexpr const char* kIconHide = "\xEE\xB4\x9A";        // U+ED1A
-constexpr const char* kIconShow = "\xEE\xA2\x90";        // U+E890
-constexpr const char* kIconLock = "\xEE\x9C\xAE";        // U+E72E
-constexpr const char* kIconUnlock = "\xEE\x9E\x85";      // U+E785
-constexpr const char* kIconUp = "\xEE\x9D\x8A";          // U+E74A move to the top level
-constexpr const char* kIconFrame = "\xEE\x9C\xA1";       // U+E721 Search: frame the selection, find uses
+// Glyphs from engine docs/TOOL_DESIGN.md section 2 (Fluent UI System Icons, names in comments)
+constexpr const char* kIconAdd = "\xEF\x84\x89";     // add
+constexpr const char* kIconRemove = "\xEE\xAF\x90";  // subtract remove from a list
+constexpr const char* kIconRefresh = "\xEF\x84\xBD"; // arrow_clockwise
+constexpr const char* kIconPlay = "\xEF\x98\x85";    // play
+constexpr const char* kIconCamera = "\xEF\x89\x94";  // camera capture
+constexpr const char* kIconClear = "\xEE\x97\xA4";   // eraser
+constexpr const char* kIconOpenFile = "\xEF\x90\xB0";    // folder_open_vertical open a scene file
+constexpr const char* kIconOpenProject = "\xEF\x90\x98"; // folder Folder: open a project folder
+constexpr const char* kIconCopy = "\xEF\x8C\xAB";        // copy copy, duplicate
+constexpr const char* kIconDelete = "\xEF\x8D\x8C";      // delete
+constexpr const char* kIconHide = "\xEE\x97\xB5";        // eye_off
+constexpr const char* kIconShow = "\xEE\x97\xB2";        // eye
+constexpr const char* kIconLock = "\xEE\x9E\x8F";        // lock_closed
+constexpr const char* kIconUnlock = "\xEE\x9E\x95";      // lock_open
+constexpr const char* kIconUp = "\xEF\x86\x9B";          // arrow_up move to the top level
+constexpr const char* kIconFrame = "\xEF\x9A\x8F";       // search Search: frame the selection, find uses
 // Panel tabs (engine docs/TOOL_DESIGN.md section 2 "Panels")
-constexpr const char* kIconTree = "\xEE\xA3\xBD";        // U+E8FD Hierarchy
-constexpr const char* kIconInspector = "\xEE\xA7\xA9";   // U+E9E9
-constexpr const char* kIconFolder = "\xEE\xA2\xB7";      // U+E8B7 Assets
-constexpr const char* kIconBrightness = "\xEE\x9C\x86";  // U+E706 Environment
-constexpr const char* kIconPerformance = "\xEE\xA7\x99"; // U+E9D9 Stats
-constexpr const char* kIconLanguage = "\xEF\x8A\xB7";    // U+F2B7 LocaleLanguage
-constexpr const char* kIconLookDev = "\xEE\x9F\xB4";     // U+E7F4 Look Dev (the editor's Preview)
+constexpr const char* kIconTree = "\xEF\x9E\xAE";        // text_bullet_list_tree Hierarchy
+constexpr const char* kIconInspector = "\xEE\xA2\xBD";   // panel_right
+constexpr const char* kIconFolder = "\xEF\x90\x98";      // folder Assets
+constexpr const char* kIconBrightness = "\xEE\x87\xB7";  // brightness_high Environment
+constexpr const char* kIconPerformance = "\xEF\x93\x87"; // gauge Stats
+constexpr const char* kIconLanguage = "\xEF\x93\xB3";    // local_language LocaleLanguage
+constexpr const char* kIconLookDev = "\xEF\x8D\x99";     // desktop Look Dev (the editor's Preview)
 // Hierarchy kind icons (module-editor ImGuiLayer.h icon::, the editor's scene tree)
-constexpr const char* kIconBox = "\xEE\x9C\xB9";    // U+E739 solid, decoration
-constexpr const char* kIconModel = "\xEE\x9E\xB8";  // U+E7B8 an object with a model
-constexpr const char* kIconPin = "\xEE\x9C\x87";    // U+E707 spawn and other markers
-constexpr const char* kIconArea = "\xEE\xA0\x8A";   // U+E80A volumes
-constexpr const char* kIconLight = "\xEE\xAA\x80";  // U+EA80 point light
-constexpr const char* kIconProbe = "\xEE\xA4\x89";  // U+E909 reflection probe
-constexpr const char* kIconFlag = "\xEE\x9F\x81";   // U+E7C1 other game kinds
-constexpr const char* kIconImage = "\xEE\xA4\x9B";  // U+E91B Photo: sprite
+constexpr const char* kIconBox = "\xEF\x8A\x91";    // checkbox_unchecked solid, decoration
+constexpr const char* kIconModel = "\xEF\x8C\xB5";  // cube an object with a model
+constexpr const char* kIconPin = "\xEF\x93\xB8";    // location spawn and other markers
+constexpr const char* kIconArea = "\xEE\xAA\x85";   // select_all_off volumes
+constexpr const char* kIconLight = "\xEF\x93\x96";  // lightbulb point light
+constexpr const char* kIconProbe = "\xEF\x8A\xBD";  // circle_half_fill reflection probe
+constexpr const char* kIconFlag = "\xEF\x90\x8B";   // flag other game kinds
+constexpr const char* kIconImage = "\xEF\x92\x88";  // image Photo: sprite
 
 // Orthographic projection with reversed z like perspectiveReversedZ (the engine's orthographicReversedZ): near maps to 1, far to 0
 Mat4 orthographicReversedZ(f32 halfHeight, f32 aspect, f32 zNear, f32 zFar) {
@@ -2407,7 +2407,7 @@ void App::emptyState(const char* sentence, const std::function<void()>& buttons)
 }
 
 namespace {
-constexpr const char* kIconView = "\xEE\xA2\x90"; // U+E890 View: the view mode pill
+constexpr const char* kIconView = "\xEE\x97\xB2"; // eye View: the view mode pill
 // The engine editor's view mode names and order (render::DebugView), with what the colors mean
 struct ViewModeInfo {
     const char* name;

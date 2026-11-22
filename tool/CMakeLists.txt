@@ -11,6 +11,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/mkcontract ${CMAKE_C
 add_executable(MkRender WIN32 main.cpp App.h App.cpp Assets.h Assets.cpp Model.h Model.cpp Anim.h Anim.cpp Process.cpp SceneFile.h SceneFile.cpp Strings.h Strings.cpp ${imguizmo})
 target_include_directories(MkRender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imguizmo)
 target_link_libraries(MkRender PRIVATE mkrender mkbake mkterrain mkcontract_client mkrender_imgui SDL3::SDL3-static)
+if(NOT MSVC)
+    # mkrhi (its ImGui backend) and mkrender_imgui need each other, and GNU ld reads a static library once, in order
+    target_link_libraries(MkRender PRIVATE "$<LINK_GROUP:RESCAN,mkrhi,mkrender_imgui>")
+endif()
 if(WIN32)
     target_link_libraries(MkRender PRIVATE dwmapi) # editor-colored title bar
 endif()

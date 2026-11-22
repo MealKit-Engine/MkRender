@@ -2,7 +2,7 @@
 #   mkrhi     thin graphics API layer (DX12 or Vulkan), takes a native window handle and size
 #   mkrender  forward renderer on mkrhi with plain inputs, its shaders compiled by DXC at build time (MKRENDER_DXC)
 # No engine headers; the host passes a log callback (mkrhi::setLog) and, optionally, Dear ImGui and Tracy targets.
-# Built standalone it includes tests and the MkRender scene editor (tool/, Windows); added by another project with add_subdirectory, only the libraries.
+# Built standalone it includes tests and the MkRender scene editor (tool/, Windows and Linux X11); added by another project with add_subdirectory, only the libraries.
 #   cmake -S . -B build && cmake --build build && ctest --test-dir build
 # Values the including side can set:
 #   MKRHI_BACKEND              DX12 (default) or Vulkan
@@ -21,7 +21,7 @@ set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
 set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)
 option(MKRENDER_OBJECT_LIBRARIES "Build OBJECT libraries instead of STATIC" OFF)
 option(MKRENDER_BUILD_TESTS "Build MkRender tests" ${PROJECT_IS_TOP_LEVEL})
-if(WIN32 AND PROJECT_IS_TOP_LEVEL)
+if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND PROJECT_IS_TOP_LEVEL)
     set(mkrender_tool_default ON)
 else()
     set(mkrender_tool_default OFF)

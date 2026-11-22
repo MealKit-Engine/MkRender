@@ -211,11 +211,11 @@ int checkTerrain(const std::string& path) {
         std::vector<mkrender::ScatterInstance> items;
         if (!mkrender::readScatter(bytes, items, error)) return std::printf("TERRAIN FAIL %s\n", error.c_str()), 1;
         again = mkrender::scatterText(items);
-        std::string unix;
+        std::string lf; // not "unix": a predefined macro on Linux
         for (char c : bytes)
-            if (c != '\r') unix += c;
-        std::printf("TERRAIN %s (%zu instances)\n", again == unix ? "same" : "differs", items.size());
-        return again == unix ? 0 : 1;
+            if (c != '\r') lf += c;
+        std::printf("TERRAIN %s (%zu instances)\n", again == lf ? "same" : "differs", items.size());
+        return again == lf ? 0 : 1;
     }
     mkrender::Heightmap map;
     if (!mkrender::decodeHeightmap(reinterpret_cast<const mkrender::u8*>(bytes.data()), bytes.size(), map, error))
@@ -354,6 +354,9 @@ int main(int argc, char** argv) {
     }
     mkrhi::setLog(logLine);
 
+#if defined(__linux__)
+    SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11"); // mkrhi's Vulkan surface is VK_KHR_xlib_surface (XWayland on Wayland desktops)
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
@@ -383,7 +386,14 @@ int main(int argc, char** argv) {
         SDL_free(pref);
     }
     mkrender::RendererDesc desc;
+#if defined(_WIN32)
     desc.window = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+#elif defined(__linux__)
+    mkrhi::XlibWindow xlibWindow;
+    xlibWindow.display = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
+    xlibWindow.window = static_cast<unsigned long>(SDL_GetNumberProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
+    desc.window = &xlibWindow;
+#endif
     desc.width = static_cast<mkrender::u32>(pw);
     desc.height = static_cast<mkrender::u32>(ph);
     desc.debugLayer = debugLayer;

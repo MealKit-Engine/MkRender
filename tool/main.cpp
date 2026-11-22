@@ -318,6 +318,7 @@ int checkScene(const std::string& path) {
 
 int main(int argc, char** argv) {
     std::string project, file, capture;
+    bool fileIsAsset = false; // the file came from --file (relative to the project's assets), not a plain argument
     std::string focusWindow; // --window Assets: that window in front
     std::string language;    // --lang en: this run only, the suite setting stays (captures)
     std::string goldenShots, goldenOut; // --render-golden <shots.txt> <folder>: the engine's graphics regression shots, saved as <name>.png
@@ -332,7 +333,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = std::strtol(argv[++i], nullptr, 10);
         else if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) capture = argv[++i];
         else if (std::strcmp(argv[i], "--project") == 0 && i + 1 < argc) project = argv[++i];
-        else if (std::strcmp(argv[i], "--file") == 0 && i + 1 < argc) file = argv[++i];
+        else if (std::strcmp(argv[i], "--file") == 0 && i + 1 < argc) { file = argv[++i]; fileIsAsset = true; }
         else if (std::strcmp(argv[i], "--select") == 0 && i + 1 < argc) selectIds = argv[++i];
         else if (std::strcmp(argv[i], "--debug-layer") == 0) debugLayer = true;
         else if (std::strcmp(argv[i], "--bake-probes") == 0) bakeProbes = true;
@@ -350,7 +351,7 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--version") == 0) {
             std::printf("MkRender %s (%s)\n", MKRENDER_VERSION, mkrhi::backendName());
             return 0;
-        } else if (argv[i][0] != '-') file = argv[i];
+        } else if (argv[i][0] != '-') { file = argv[i]; fileIsAsset = false; }
     }
     mkrhi::setLog(logLine);
 
@@ -429,6 +430,16 @@ int main(int argc, char** argv) {
     app.strongFont = strongFont;
     app.init(window, renderer);
     app.log(std::string("MkRender ") + MKRENDER_VERSION + ", " + mkrhi::backendName() + ", " + renderer.adapterName());
+    // Hosts pass `--file` relative to the project's assets folder (MealKit-Contract "Opening a tool"), and start us in our own folder
+    if (fileIsAsset && !project.empty()) {
+        std::error_code ec;
+        const std::u8string p8(project.begin(), project.end()), f8(file.begin(), file.end());
+        const std::filesystem::path asset = std::filesystem::path(p8) / "assets" / std::filesystem::path(f8);
+        if (std::filesystem::is_regular_file(asset, ec)) {
+            const auto u8 = asset.u8string();
+            file.assign(u8.begin(), u8.end());
+        }
+    }
     if (!project.empty() && file.empty()) app.openProject(project);
     else if (!file.empty()) app.openFile(file);
     if (lighting >= 0) app.setLightingModel(static_cast<mkrender::LightingModel>(lighting));

@@ -1129,6 +1129,21 @@ bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
     return true;
 }
 
+namespace {
+// Waits for a fence in 1 s steps and logs each miss, so a wait the driver never finishes shows in the log and the caller can drop the frame
+// (Mesa on Intel hung in DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT with several processes drawing at once, ROADMAP "multi-player play start hangs").
+bool waitFence(VkDevice device, VkFence fence, const char* what) {
+    constexpr int kTries = 5;
+    for (int i = 0; i < kTries; ++i) {
+        const VkResult r = vkWaitForFences(device, 1, &fence, VK_TRUE, 1'000'000'000ull);
+        if (r == VK_SUCCESS) return true;
+        if (r != VK_TIMEOUT) { VK(r); return false; }
+        MKRHI_WARN("[Vulkan] %s: fence not signaled after %d s", what, i + 1);
+    }
+    return false;
+}
+} // namespace
+
 bool Device::beginFrame() {
     if (!m || m->width == 0 || m->height == 0) return false;
     if (m->swapchainDirty || !m->swapchain) {
@@ -1136,9 +1151,14 @@ bool Device::beginFrame() {
         if (!m->createSwapchain()) return false;
     }
     Impl::Frame& frame = m->frames[m->frameIndex];
-    VK(vkWaitForFences(m->device, 1, &frame.fence, VK_TRUE, UINT64_MAX));
+    if (!waitFence(m->device, frame.fence, "beginFrame")) return false;
     const VkResult acquired =
-        vkAcquireNextImageKHR(m->device, m->swapchain, UINT64_MAX, frame.imageAcquired, VK_NULL_HANDLE, &m->imageIndex);
+        vkAcquireNextImageKHR(m->device, m->swapchain, 1'000'000'000ull, frame.imageAcquired, VK_NULL_HANDLE, &m->imageIndex);
+    if (acquired == VK_TIMEOUT || acquired == VK_NOT_READY) { // no image in 1 s: drop this frame and rebuild the swap chain
+        MKRHI_WARN("[Vulkan] vkAcquireNextImageKHR timed out, recreating the swap chain");
+        m->swapchainDirty = true;
+        return false;
+    }
     if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
         m->swapchainDirty = true;
         return false;
@@ -1254,7 +1274,7 @@ void Device::endFrame(bool vsync, Capture* capture) {
     }
 
     if (readback) {
-        VK(vkWaitForFences(m->device, 1, &frame.fence, VK_TRUE, UINT64_MAX));
+        if (!waitFence(m->device, frame.fence, "capture readback")) { capture->width = capture->height = 0; capture->rgba.clear(); return; }
         VK(vmaInvalidateAllocation(m->allocator, readbackAllocation, 0, VK_WHOLE_SIZE));
         capture->width = captureW;
         capture->height = captureH;

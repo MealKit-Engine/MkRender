@@ -2,7 +2,7 @@
 
 The renderer of the [MealKit](https://github.com/MealKit-Engine/MealKit) engine as engine-free libraries, part of the MealKit tool family. Free, MIT.
 
-> **Beta (v0.x).** APIs may change between versions until v1.0.
+> **Beta (v0.x).** APIs may change between versions.
 
 | Library | What it is |
 |---|---|

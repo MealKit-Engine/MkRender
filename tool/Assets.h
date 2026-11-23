@@ -5,6 +5,7 @@
 #include "mkrender/Renderer.h"
 #include "mkrender/Terrain.h"
 
+#include <chrono>
 #include <map>
 #include <string>
 #include <vector>
@@ -57,6 +58,16 @@ struct GpuEntry {
     std::string error;
 };
 
+// One row of assets/tables/sprite_clips.table (engine docs/DECISIONS.md 2026-11-23): frames firstCell .. firstCell + frames - 1 of a sheet
+struct SpriteClipRow {
+    std::string name, image;
+    int columns = 1, rows = 1, firstCell = 0, frames = 1;
+    f32 fps = 8.0f;
+    bool loop = true;
+    // Cell shown `seconds` after the clip started (the engine's SpriteClips::cellAt)
+    int cellAt(double seconds) const;
+};
+
 class Assets {
 public:
     void init(Renderer& renderer);
@@ -83,6 +94,9 @@ public:
 
     // Sprite quad of one cell of an image sheet (cached per image and cell layout)
     const SpriteEntry& sprite(const std::string& image, int columns, int rows, int cell, f32 pivotX, f32 pivotY, bool flipX, bool flipY);
+    // Flipbook clips of the project (reread when the table changes on disk, checked once a second); empty without the table
+    const std::vector<SpriteClipRow>& spriteClips();
+    const SpriteClipRow* spriteClip(const std::string& name); // nullptr if missing
     // Scatter file (reread when it changes on disk)
     const ScatterEntry& scatter(const std::string& file);
 
@@ -129,6 +143,9 @@ private:
     };
     std::map<std::string, ImageEntry> m_images; // sprite textures by path
     std::map<std::string, SpriteEntry> m_sprites;
+    std::vector<SpriteClipRow> m_clips;
+    long long m_clipsTime = -2; // -2: never read, -1: no file
+    std::chrono::steady_clock::time_point m_clipsChecked{};
     struct ScatterFile {
         ScatterEntry entry;
         long long time = 0;

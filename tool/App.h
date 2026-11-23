@@ -134,6 +134,12 @@ private:
     void findUses(const std::string& path);
     void savePrefab(const std::string& name);
     bool groundPoint(f32 mouseX, f32 mouseY, Vec3& out); // under the mouse: an object's surface or the y = 0 floor
+    // Image, grid and cell a sprite object shows: its own fields, or its flipbook clip's frame at the view time (a clip replaces them)
+    struct SpriteSheet {
+        std::string image;
+        int columns = 1, rows = 1, cell = 0;
+    };
+    SpriteSheet spriteSheet(const Entity& e);
     Vec3 spriteSize(const Entity& e); // multiplier of the object's x/y scale (pixelsPerUnit), 1 1 otherwise
     void reparent(u32 id, u32 parent);
     void frameSelected();
@@ -183,6 +189,7 @@ private:
 
     // Sprites (inspector): image picker, a sheet slicer over a picture of the whole image (click a cell), pivot presets
     void drawSpriteInspector(Entity& e);
+    void drawSpritePivot(Entity& e);
     void prepareSheet(); // fill(): the picture of m_sheetWanted when it isn't drawn yet
     mkrhi::RenderTarget m_sheetTarget{};
     std::string m_sheetWanted, m_sheetDrawn; // image the slicer shows this frame / image in m_sheetTarget

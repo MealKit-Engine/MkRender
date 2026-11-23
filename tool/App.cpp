@@ -1108,15 +1108,32 @@ bool App::groundPoint(f32 mx, f32 my, Vec3& out) {
     return false;
 }
 
-Vec3 App::spriteSize(const Entity& e) {
-    f32 ppu = 0.0f;
-    parseFloat(e.field("pixelsPerUnit"), ppu);
-    if (ppu <= 0.0f) return {1, 1, 1};
+App::SpriteSheet App::spriteSheet(const Entity& e) {
+    SpriteSheet s;
+    s.image = e.field("image");
     f32 columns = 1, rows = 1, cell = 0;
     parseFloat(e.field("columns"), columns);
     parseFloat(e.field("rows"), rows);
     parseFloat(e.field("cell"), cell);
-    const SpriteEntry& s = m_assets.sprite(e.field("image"), static_cast<int>(columns), static_cast<int>(rows), static_cast<int>(cell), 0.5f, 0.5f, false, false);
+    s.columns = static_cast<int>(columns);
+    s.rows = static_cast<int>(rows);
+    s.cell = static_cast<int>(cell);
+    if (const SpriteClipRow* clip = m_assets.spriteClip(e.field("clip"))) { // unknown clip name: the object's own image, like the game
+        s.image = clip->image;
+        s.columns = clip->columns;
+        s.rows = clip->rows;
+        s.cell = clip->cellAt(m_playAnims ? m_time : 0.0);
+    }
+    return s;
+}
+
+Vec3 App::spriteSize(const Entity& e) {
+    f32 ppu = 0.0f;
+    parseFloat(e.field("pixelsPerUnit"), ppu);
+    if (ppu <= 0.0f) return {1, 1, 1};
+    const SpriteSheet sheet = spriteSheet(e);
+    if (sheet.image.empty()) return {1, 1, 1}; // no image: nothing to read (Assets::sprite would open the assets folder)
+    const SpriteEntry& s = m_assets.sprite(sheet.image, sheet.columns, sheet.rows, sheet.cell, 0.5f, 0.5f, false, false);
     if (!s.cellWidth) return {1, 1, 1};
     return {s.cellWidth / ppu, s.cellHeight / ppu, 1};
 }
@@ -1785,14 +1802,12 @@ void App::addScene(DrawList& list) {
         if (m_hidden.count(e.id)) continue;
         const Transform w = worldTransform(m_scene, e);
         if (e.is(kKindSprite)) {
-            f32 columns = 1, rows = 1, cell = 0, px = 0.5f, py = 0.5f;
-            parseFloat(e.field("columns"), columns);
-            parseFloat(e.field("rows"), rows);
-            parseFloat(e.field("cell"), cell);
+            f32 px = 0.5f, py = 0.5f;
             parseFloat(e.field("pivotX"), px);
             parseFloat(e.field("pivotY"), py);
-            if (e.field("image").empty()) continue;
-            const SpriteEntry& s = m_assets.sprite(e.field("image"), static_cast<int>(columns), static_cast<int>(rows), static_cast<int>(cell), px, py,
+            const SpriteSheet sheet = spriteSheet(e);
+            if (sheet.image.empty()) continue;
+            const SpriteEntry& s = m_assets.sprite(sheet.image, sheet.columns, sheet.rows, sheet.cell, px, py,
                                                    e.field("flipX") == "true", e.field("flipY") == "true");
             if (s.mesh == kNoMesh) {
                 if (std::find(m_modelProblems.begin(), m_modelProblems.end(), s.error) == m_modelProblems.end()) {
@@ -3005,7 +3020,7 @@ void App::drawOverlay() {
             if ((selected || ImGui::GetIO().KeyAlt) && project(w.position, x, y)) dl->AddText({x, y}, IM_COL32(230, 230, 230, 230), e.name.c_str());
             continue;
         }
-        if (isMarker(e) || e.is(kKindScatter) || (e.is(kKindSprite) && e.field("image").empty())) {
+        if (isMarker(e) || e.is(kKindScatter) || (e.is(kKindSprite) && spriteSheet(e).image.empty())) {
             if (!m_showMarkers && !selected) continue;
             f32 x, y;
             if (!project(w.position, x, y)) continue;
@@ -3282,6 +3297,26 @@ constexpr PivotPreset kPivots[9] = {{trn("Top left"), 0.0f, 1.0f},    {trn("Top"
 
 void App::drawSpriteInspector(Entity& e) {
     form::section(tr("Sprite"));
+    const std::vector<SpriteClipRow>& clips = m_assets.spriteClips();
+    const std::string clipName = e.field("clip");
+    const SpriteClipRow* clip = m_assets.spriteClip(clipName);
+    if (!clips.empty() || !clipName.empty()) {
+        row(tr("Flipbook clip"));
+        if (ImGui::BeginCombo("##clip", clipName.empty() ? tr("(none)") : clipName.c_str())) {
+            if (ImGui::Selectable(tr("(none)"), clipName.empty())) e.setField("clip", "");
+            for (const SpriteClipRow& c : clips)
+                if (ImGui::Selectable(c.name.c_str(), c.name == clipName)) e.setField("clip", c.name);
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip(tr("A row of tables/sprite_clips.table: it replaces the image, grid and cell below"));
+    }
+    if (!clipName.empty() && !clip) ImGui::TextColored({1.0f, 0.5f, 0.4f, 1.0f}, "%s", trf("No clip named %s in sprite_clips.table: the sprite's own image is drawn", clipName.c_str()).c_str());
+    if (clip) {
+        ImGui::TextDisabled("%s", trf("%s, %d frames at %g fps, %s", clip->image.c_str(), clip->frames, static_cast<double>(clip->fps), clip->loop ? tr("looping") : tr("once")).c_str());
+        if (!m_playAnims) ImGui::TextDisabled("%s", tr("Animation is paused: the first frame is shown"));
+        drawSpritePivot(e);
+        return;
+    }
     const std::string image = e.field("image");
     row(tr("Image"));
     if (ImGui::BeginCombo("##image", image.empty() ? tr("(none)") : image.c_str(), ImGuiComboFlags_HeightLarge)) {
@@ -3368,6 +3403,10 @@ void App::drawSpriteInspector(Entity& e) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) e.setField("cell", std::to_string(index));
     }
 
+    drawSpritePivot(e);
+}
+
+void App::drawSpritePivot(Entity& e) {
     // Pivot: 3 x 3 buttons placed like the point they set on the image
     f32 px = 0.5f, py = 0.5f;
     parseFloat(e.field("pivotX"), px);
@@ -3527,7 +3566,8 @@ void App::updateBadges() {
             else if (!m.warnings.empty()) add(false, e.model + ": " + m.warnings.front());
         }
         if (e.is(kKindSprite)) {
-            const std::string image = e.field("image");
+            const std::string image = spriteSheet(e).image;
+            if (!e.field("clip").empty() && !m_assets.spriteClip(e.field("clip"))) add(false, trf("No clip named %s in sprite_clips.table", e.field("clip").c_str()));
             if (image.empty()) {
                 add(false, tr("No image"));
             } else {

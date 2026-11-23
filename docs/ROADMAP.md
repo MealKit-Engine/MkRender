@@ -3,17 +3,13 @@
 Only work that is left. When an item is done, remove it here and describe it in the engine's `docs/CHANGELOG.md` under the item's name (MkRender versions are in `git log`).
 Sources: engine `docs/ROADMAP.md` "Scene editing in MkRender, leftovers", "MkRender leftovers" and "Design refresh for the rest of the suite"; engine `docs/TOOL_DESIGN.md` sections 6 and 7; the scene tree, inspector and viewport items of the engine's "Editor usability" list (moved here 2026-11-22, sections 4 and 5; numbers are those of the 2026-11-04 list).
 
-**Suggested order**: 1, then 3; 2 when the engine has flipbook clips; 4 one piece at a time when scenes grow (FuseTag maps).
+**Suggested order**: 1, then 3; 4 one piece at a time when scenes grow (FuseTag maps).
 
 ## 1. Suite look (engine TOOL_DESIGN section 6 checklist)
 
 MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title bar, the app icon, outlined checkboxes, panel tab icons, right-click items for its icon actions and the empty states (engine CHANGELOG "Design refresh ... part 6" and "part 8"). Left:
 
 - [ ] Section 6 item 7: a screenshot beside the editor at the same DPI, then update the MkRender row of TOOL_DESIGN section 7.
-
-## 2. Sprites, later
-
-- [ ] With the engine's flipbook clips (engine ROADMAP "2D on the 3D engine"): previewing a clip on the selected sprite.
 
 ## 3. Later
 
@@ -30,4 +26,4 @@ The editor's scene editing left in MkRender step 10, so these items of the engin
 ## 5. What MkRender does not cover (2026-11-22)
 
 By design it stays with the MealKit editor, which MkRender reaches over the live link (checked on Linux with `--editor-play`): playing (solo, from here, multi-player, game code hot reload, sim debug), the look-through and cutscene previews drawn by the running game's camera brain, the feedback, tables and tuning panels, event light previews, and building and exporting.
-Not covered yet and not scheduled: viewing the scene through a virtual camera or a cutscene with no editor running (item 31 would cover the camera), flipbook clips (section 2), and the items of section 4.
+Not covered yet and not scheduled: viewing the scene through a virtual camera or a cutscene with no editor running (item 31 would cover the camera), and the items of section 4.

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -68,6 +69,7 @@ void Assets::init(Renderer& renderer) {
 void Assets::setAssetsDir(const std::string& dir) {
     if (dir == m_assetsDir) return;
     m_assetsDir = dir;
+    m_clipsTime = -2; // another project: reread its clips
     m_models.clear();
     m_terrains.clear();
     m_environments.clear();
@@ -240,6 +242,74 @@ void Assets::reloadAll() {
     m_luts.clear();
     m_probes.clear();
     m_scatters.clear();
+}
+
+int SpriteClipRow::cellAt(double seconds) const {
+    const long long count = std::max(frames, 1);
+    long long frame = 0;
+    if (seconds > 0.0 && fps > 0.0f) {
+        const long long step = static_cast<long long>(std::floor(seconds * static_cast<double>(fps)));
+        frame = loop ? step % count : std::min(step, count - 1);
+    }
+    return std::max(firstCell, 0) + static_cast<int>(frame);
+}
+
+const std::vector<SpriteClipRow>& Assets::spriteClips() {
+    const auto now = std::chrono::steady_clock::now();
+    if (m_clipsTime != -2 && now - m_clipsChecked < std::chrono::seconds(1)) return m_clips;
+    m_clipsChecked = now;
+    const std::string path = m_assetsDir.empty() ? std::string() : resolve("tables/sprite_clips.table");
+    std::error_code ec;
+    const bool exists = !path.empty() && std::filesystem::is_regular_file(pathOf(path), ec);
+    const long long time = exists ? writeTime(path) : -1; // the file clock can be negative: -1 only marks a missing table
+    if (time == m_clipsTime) return m_clips;
+    m_clipsTime = time;
+    m_clips.clear();
+    std::string text;
+    if (!exists || !readBytes(path, text)) return m_clips;
+    // Text table: "row <name>" starts a clip, then "<key> <value>" lines; '#' lines and "@format" are skipped
+    const auto number = [](const std::string& v, auto fallback) {
+        try {
+            return static_cast<decltype(fallback)>(std::stod(v));
+        } catch (...) {
+            return fallback;
+        }
+    };
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos || line[start] == '#' || line[start] == '@') continue;
+        line = line.substr(start);
+        const size_t space = line.find_first_of(" \t");
+        const std::string key = line.substr(0, space);
+        const std::string value = space == std::string::npos ? std::string() : line.substr(line.find_first_not_of(" \t", space) == std::string::npos ? line.size() : line.find_first_not_of(" \t", space));
+        if (key == "row") {
+            m_clips.push_back({});
+            m_clips.back().name = value;
+        } else if (!m_clips.empty()) {
+            SpriteClipRow& c = m_clips.back();
+            if (key == "image") c.image = value;
+            else if (key == "columns") c.columns = std::max(number(value, 1), 1);
+            else if (key == "rows") c.rows = std::max(number(value, 1), 1);
+            else if (key == "firstCell") c.firstCell = number(value, 0);
+            else if (key == "frames") c.frames = std::max(number(value, 1), 1);
+            else if (key == "fps") c.fps = number(value, 8.0f);
+            else if (key == "loop") c.loop = value != "false" && value != "0" && value != "off";
+        }
+    }
+    return m_clips;
+}
+
+const SpriteClipRow* Assets::spriteClip(const std::string& name) {
+    if (name.empty()) return nullptr;
+    for (const SpriteClipRow& c : spriteClips())
+        if (c.name == name) return &c;
+    return nullptr;
 }
 
 const SpriteEntry& Assets::sprite(const std::string& image, int columns, int rows, int cell, f32 pivotX, f32 pivotY, bool flipX, bool flipY) {

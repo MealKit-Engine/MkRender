@@ -44,6 +44,7 @@ public:
     void addToSelection(u32 id) { syncSelection(); if (!isSelected(id)) clickSelect(id, true); }
     void setLightingModel(LightingModel model);
     void setDebugView(DebugView view) { m_debugView = view; } // --view-mode
+    void setPixelInspect(i32 x, i32 y) { m_pixelInspect = true, m_pixelAutoX = x, m_pixelAutoY = y; } // --pixel x,y: reads that window pixel every frame
     std::string title() const;
     void log(const std::string& line);
     void saveScreenshot(const std::string& path, bool withUi);
@@ -242,6 +243,14 @@ private:
     f32 m_lookYaw = 0.6f, m_lookPitch = 0.25f, m_lookZoom = 1.0f, m_lookFlash = 0.0f, m_lookDissolve = 0.0f;
     bool m_lookSpin = true;
     std::vector<std::string> m_lookHdris;
+
+    // Pixel inspector (View pill, T2): while on, the left button reads the pixel under the mouse in the scene view or the Look Dev image
+    // instead of selecting/turning. The reading is Renderer::pixelInspect(), shown by the view that asked for it
+    bool m_pixelInspect = false;
+    i32 m_pixelAutoX = -1, m_pixelAutoY = -1;
+    u32 m_pixelFrom = 0; // 0 none, 1 scene view, 2 Look Dev
+    void drawPixelReadout(bool lookDev);
+    void samplePixel(f32 mx, f32 my, bool lookDev); // ImGui mouse position (Look Dev: relative to the image) at the end of this frame
     f64 m_lastDt = 0.0;
 
     void* m_window = nullptr;

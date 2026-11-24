@@ -884,7 +884,7 @@ u32 Device::copyPitch(u32 width, u32 bytesPerPixel) const {
 
 u32 Device::copyAlignment() const { return D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT; }
 
-void Device::endFrame(bool vsync, Capture* capture) {
+void Device::endFrame(bool vsync, Capture* capture, PixelRead* reads, u32 readCount) {
     if (!m || !m->inFrame) return;
     ID3D12GraphicsCommandList* list = m->list.Get();
     ID3D12Resource* backBuffer = m->backBuffers[m->backBufferIndex].Get();
@@ -917,6 +917,43 @@ void Device::endFrame(bool vsync, Capture* capture) {
         const D3D12_RESOURCE_BARRIER back = transition(captured, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                                        captured == backBuffer ? D3D12_RESOURCE_STATE_PRESENT : capturedState);
         list->ResourceBarrier(1, &back);
+    }
+    // Pixel inspector: one texel each into a shared readback buffer (a capture frame skips them)
+    constexpr u32 kPixelSlot = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT; // one placed footprint per read
+    ComPtr<ID3D12Resource> pixelReadback;
+    if (capture || readCount > kMaxPixelReads) readCount = 0;
+    if (readCount && reads) {
+        const D3D12_HEAP_PROPERTIES readbackHeap = heapProperties(D3D12_HEAP_TYPE_READBACK);
+        const D3D12_RESOURCE_DESC rbDesc = bufferDesc(static_cast<u64>(kPixelSlot) * readCount);
+        if (SUCCEEDED(m->device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &rbDesc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                         nullptr, IID_PPV_ARGS(&pixelReadback)))) {
+            for (u32 i = 0; i < readCount; ++i) {
+                PixelRead& read = reads[i];
+                read.valid = false;
+                const bool fromBack = !read.source;
+                ID3D12Resource* res = fromBack ? backBuffer : m->textures[m->targets[read.source.id - 1].texture - 1].resource.Get();
+                const D3D12_RESOURCE_DESC rd = res->GetDesc();
+                if (read.x >= rd.Width || read.y >= rd.Height) continue;
+                const D3D12_RESOURCE_STATES state = fromBack ? current : toD3d(TextureState::ShaderRead);
+                const D3D12_RESOURCE_BARRIER toCopy = transition(res, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                list->ResourceBarrier(1, &toCopy);
+                D3D12_TEXTURE_COPY_LOCATION dst{};
+                dst.pResource = pixelReadback.Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.PlacedFootprint.Offset = static_cast<u64>(i) * kPixelSlot;
+                dst.PlacedFootprint.Footprint = {rd.Format, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
+                D3D12_TEXTURE_COPY_LOCATION src{};
+                src.pResource = res;
+                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                const D3D12_BOX box{read.x, read.y, 0, read.x + 1, read.y + 1, 1};
+                list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+                const D3D12_RESOURCE_BARRIER back = transition(res, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+                list->ResourceBarrier(1, &back);
+                read.valid = true; // confirmed after the GPU finishes
+            }
+        } else {
+            for (u32 i = 0; i < readCount; ++i) reads[i].valid = false;
+        }
     }
     if ((!capture || captured != backBuffer) && m->backBufferIsTarget) {
         const D3D12_RESOURCE_BARRIER toPresent =
@@ -952,6 +989,21 @@ void Device::endFrame(bool vsync, Capture* capture) {
     }
 #endif
 
+    if (pixelReadback) {
+        m->waitForFence(frame.fenceValue);
+        u8* data = nullptr;
+        const D3D12_RANGE readRange{0, static_cast<SIZE_T>(kPixelSlot) * readCount};
+        const bool mapped = SUCCEEDED(pixelReadback->Map(0, &readRange, reinterpret_cast<void**>(&data)));
+        for (u32 i = 0; i < readCount; ++i) {
+            if (!reads[i].valid) continue;
+            if (mapped) std::memcpy(reads[i].texel, data + static_cast<u64>(i) * kPixelSlot, 4);
+            else reads[i].valid = false;
+        }
+        if (mapped) {
+            const D3D12_RANGE noWrite{0, 0};
+            pixelReadback->Unmap(0, &noWrite);
+        }
+    }
     if (readback) {
         m->waitForFence(frame.fenceValue);
         const u32 w = footprint.Footprint.Width, h = footprint.Footprint.Height;

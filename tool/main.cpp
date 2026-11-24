@@ -329,6 +329,7 @@ int main(int argc, char** argv) {
     bool debugLayer = false;
     int lighting = -1;
     int viewMode = 0; // --view-mode: render::DebugView (0 lit)
+    int pixelX = -1, pixelY = -1; // --pixel x,y: pixel inspector at that window pixel
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = std::strtol(argv[++i], nullptr, 10);
         else if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) capture = argv[++i];
@@ -344,6 +345,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--render-golden") == 0 && i + 2 < argc) goldenShots = argv[++i], goldenOut = argv[++i];
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--check-terrain") == 0 && i + 1 < argc) return checkTerrain(argv[++i]);
+        else if (std::strcmp(argv[i], "--pixel") == 0 && i + 1 < argc) std::sscanf(argv[++i], "%d,%d", &pixelX, &pixelY);
         else if (std::strcmp(argv[i], "--view-mode") == 0 && i + 1 < argc) viewMode = std::atoi(argv[++i]); // 0 lit .. 16 texel density (render::DebugView)
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
@@ -444,6 +446,7 @@ int main(int argc, char** argv) {
     else if (!file.empty()) app.openFile(file);
     if (lighting >= 0) app.setLightingModel(static_cast<mkrender::LightingModel>(lighting));
     if (viewMode > 0 && viewMode < static_cast<int>(mkrender::DebugView::Count)) app.setDebugView(static_cast<mkrender::DebugView>(viewMode));
+    if (pixelX >= 0 && pixelY >= 0) app.setPixelInspect(pixelX, pixelY);
     for (const char* c = selectIds.c_str(); *c;) {
         char* end = nullptr;
         const unsigned long id = std::strtoul(c, &end, 10);

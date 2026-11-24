@@ -302,6 +302,8 @@ struct Renderer::Impl {
         mkrhi::RenderTarget bloom[kBloomLevels];
         u32 width = 0, height = 0;
         u32 bloomSize[kBloomLevels][2] = {};
+        f32 exposureScale = 1.0f; // the last runPost: what pixelInspect reports
+        f32 sampleScale = 1.0f;   // and the render scale (output pixel × scale = scene texel)
     };
     PostChain mainChain;
     struct Offscreen {
@@ -343,6 +345,12 @@ struct Renderer::Impl {
     void ensureScene();
     mkrhi::RenderTarget captureSource;       // captureTarget (this endFrame)
     Image* captureOut = nullptr;
+    struct PixelRequest {
+        bool pending = false;
+        mkrhi::RenderTarget target; // none = the main view
+        u32 x = 0, y = 0;
+    } pixelRequest;
+    PixelInspect pixel;
     CaptureFn captureFn = nullptr; // requestCapture (next endFrame)
     void* captureUser = nullptr;
     void drawSky(const FrameParams& p); // after writing frame constants, before 3D (sky HDRI, or the fog → sky color gradient)
@@ -1311,6 +1319,8 @@ void Renderer::Impl::runPost(PostChain& chain, const PostParams& post, const f32
                              flags, 0};
     const f32 bloomColor[4] = {post.bloomTint.x, post.bloomTint.y, post.bloomTint.z, std::max(post.bloomThreshold, 0.0f)};
     const f32 sceneSize[4] = {w, h, scale / w, scale / h};
+    chain.exposureScale = exposure[0];
+    chain.sampleScale = scale;
     std::memcpy(pc.exposure, exposure, sizeof(exposure));
     if (tone) std::memcpy(pc.effects, effects, sizeof(effects));
     pc.effects[3] = effects[3];
@@ -1668,7 +1678,38 @@ void Renderer::endFrame() {
         m->captureOut->rgba = std::move(capture.rgba);
         m->captureOut = nullptr;
     } else if (!m->captureFn) {
-        m->device.endFrame(m->vsync);
+        if (!m->pixelRequest.pending) {
+            m->device.endFrame(m->vsync);
+        } else { // the HDR scene color and the final pixel (waits for the GPU, so only while the user picks)
+            const Impl::PixelRequest request = m->pixelRequest;
+            m->pixelRequest.pending = false;
+            const bool offscreen = request.target && request.target.id < m->offscreen.size() && m->offscreen[request.target.id].output.id == request.target.id;
+            if (request.target && !offscreen) {
+                m->device.endFrame(m->vsync);
+            } else {
+                const Impl::PostChain& chain = offscreen ? m->offscreen[request.target.id].chain : m->mainChain;
+                const f32 scale = chain.sampleScale;
+                mkrhi::PixelRead reads[2];
+                reads[0].source = chain.scene;
+                reads[0].x = std::min(static_cast<u32>(static_cast<f32>(request.x) * scale), chain.width ? chain.width - 1 : 0);
+                reads[0].y = std::min(static_cast<u32>(static_cast<f32>(request.y) * scale), chain.height ? chain.height - 1 : 0);
+                reads[1].source = request.target; // none = the back buffer
+                reads[1].x = request.x;
+                reads[1].y = request.y;
+                m->device.endFrame(m->vsync, nullptr, reads, 2);
+                PixelInspect& out = m->pixel;
+                out = {};
+                out.x = request.x;
+                out.y = request.y;
+                if (reads[0].valid && reads[1].valid) {
+                    const u32 packed = reads[0].texel[0] | reads[0].texel[1] << 8 | reads[0].texel[2] << 16 | static_cast<u32>(reads[0].texel[3]) << 24;
+                    unpackR11G11B10F(packed, out.linear);
+                    out.exposure = chain.exposureScale;
+                    std::memcpy(out.srgb, reads[1].texel, 3);
+                    out.valid = true;
+                }
+            }
+        }
     } else {
         mkrhi::Capture capture;
         m->device.endFrame(m->vsync, &capture);
@@ -1696,6 +1737,29 @@ void Renderer::parallelFor(u32 count, u32 minChunk, const std::function<void(u32
     if (m && m->parallelFor) m->parallelFor(count, minChunk, body);
     else if (count) body(0, count);
 }
+void unpackR11G11B10F(u32 packed, f32 out[3]) {
+    // 5-bit exponent (bias 15), 6-bit mantissa for red and green, 5-bit for blue. Exponent 0 is denormal, 31 is infinity/NaN
+    const auto decode = [](u32 bits, u32 mantissaBits) {
+        const u32 exponent = bits >> mantissaBits, mantissa = bits & ((1u << mantissaBits) - 1u);
+        const f32 scale = static_cast<f32>(1u << mantissaBits);
+        if (exponent == 0) return std::ldexp(static_cast<f32>(mantissa) / scale, -14);
+        if (exponent == 31) return mantissa ? 0.0f : 65504.0f; // NaN reads as black; infinity as the largest finite value
+        return std::ldexp(1.0f + static_cast<f32>(mantissa) / scale, static_cast<i32>(exponent) - 15);
+    };
+    out[0] = decode(packed & 0x7FFu, 6);
+    out[1] = decode((packed >> 11) & 0x7FFu, 6);
+    out[2] = decode((packed >> 22) & 0x3FFu, 5);
+}
+
+void Renderer::inspectPixel(u32 x, u32 y, mkrhi::RenderTarget target) {
+    if (!m) return;
+    m->pixelRequest = {true, target, x, y};
+}
+const PixelInspect& Renderer::pixelInspect() const {
+    static const PixelInspect none;
+    return m ? m->pixel : none;
+}
+
 void Renderer::captureTarget(mkrhi::RenderTarget target, Image* out) {
     if (!m || !target || !out) return;
     m->captureSource = target;

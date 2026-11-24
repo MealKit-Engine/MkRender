@@ -482,6 +482,39 @@ int main(int argc, char** argv) {
             ++failures;
             continue;
         }
+        // Pixel inspector: one more frame of the same shot, read some pixels back and compare the final color with the captured image
+        // (dither and grain move with time, so a few steps of difference are fine). The HDR value must be finite and, where the
+        // screen isn't black, not zero
+        {
+            const u32 points[][2] = {{kWidth / 2, kHeight / 2}, {kWidth / 4, kHeight / 3}, {kWidth * 3 / 4, kHeight * 2 / 3}, {10, 10}};
+            bool inspected = true;
+            int worst = 0;
+            for (const auto& point : points) {
+                pumpMessages(window);
+                list.clear();
+                if (shot.sprites) fillSprites(list, ids);
+                else fill3d(list, ids);
+                if (!renderer.beginFrame(frameFor(shot, lights))) continue;
+                list.submit(renderer);
+                renderer.beginOverlay();
+                renderer.drawUi(ui.data(), static_cast<u32>(ui.size()));
+                renderer.inspectPixel(point[0], point[1]);
+                renderer.endFrame();
+                const PixelInspect& px = renderer.pixelInspect();
+                const u8* want = &captured.image.rgba[(static_cast<size_t>(point[1]) * kWidth + point[0]) * 4];
+                bool ok = px.valid && px.x == point[0] && px.y == point[1] && px.exposure > 0.0f;
+                for (int c = 0; ok && c < 3; ++c) {
+                    ok = std::isfinite(px.linear[c]) && px.linear[c] >= 0.0f;
+                    worst = std::max(worst, std::abs(static_cast<int>(px.srgb[c]) - static_cast<int>(want[c])));
+                }
+                if (ok && worst > 0 && px.linear[0] + px.linear[1] + px.linear[2] == 0.0f && want[0] + want[1] + want[2] > 24) ok = false;
+                inspected = inspected && ok;
+            }
+            renderer.waitIdle();
+            const bool ok = inspected && worst <= 3;
+            std::printf("%s %s: pixel inspector (final color within %d of the capture)\n", ok ? "OK  " : "FAIL", shot.name, worst);
+            failures += ok ? 0 : 1;
+        }
         const std::filesystem::path golden = goldenDir / (std::string(shot.name) + ".png");
         if (update) {
             const bool ok = writePng(golden, captured.image);

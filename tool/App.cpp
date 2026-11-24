@@ -2528,8 +2528,12 @@ void App::drawViewMode() {
     ImGui::SetItemTooltip("%s", tr("View Mode"));
     if (ImGui::BeginPopup("##viewModes")) {
         viewModeItems();
+        ImGui::Separator();
+        if (ImGui::MenuItem(tr("Pixel Inspector"), nullptr, m_pixelInspect)) m_pixelInspect = !m_pixelInspect;
+        ImGui::SetItemTooltip("%s", tr("Click the view to read a pixel: HDR value, luminance and final color"));
         ImGui::EndPopup();
     }
+    if (m_pixelInspect && m_pixelFrom == 1) drawPixelReadout(false);
     if (const char* legend = kViewModes[static_cast<u32>(m_debugView)].legend; legend && on) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.92f, 0.94f, 1.0f));
         const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -2539,6 +2543,43 @@ void App::drawViewMode() {
         ImGui::PopStyleColor();
     }
     ImGui::End();
+}
+
+void App::samplePixel(f32 mx, f32 my, bool lookDev) {
+    const f32 scale = ImGui::GetIO().DisplayFramebufferScale.x; // ImGui points to pixels
+    const f32 x = std::max(0.0f, mx * scale), y = std::max(0.0f, my * scale);
+    m_renderer->inspectPixel(static_cast<u32>(x), static_cast<u32>(y), lookDev ? m_lookTarget : mkrhi::RenderTarget{});
+    m_pixelFrom = lookDev ? 2 : 1;
+}
+
+// The values Renderer::pixelInspect() holds: the HDR color before post, after exposure (what tone mapping gets), its luminance, and the
+// color on screen. Under the view pill in the scene view; in Look Dev under the image
+void App::drawPixelReadout(bool lookDev) {
+    const PixelInspect& px = m_renderer->pixelInspect();
+    if (!lookDev) {
+        ImGui::SetNextWindowPos({m_uiX + 10.0f, m_uiY + 10.0f + ImGui::GetFrameHeight() * 1.6f});
+        ImGui::SetNextWindowBgAlpha(0.82f);
+        ImGui::Begin("##pixelReadout", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking |
+                                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+                                                    ImGuiWindowFlags_NoSavedSettings);
+    }
+    if (!px.valid) {
+        ImGui::TextDisabled("%s", tr("Click the view to read a pixel: HDR value, luminance and final color"));
+    } else {
+        const f32 e = px.exposure;
+        const f32 lum = 0.2126f * px.linear[0] + 0.7152f * px.linear[1] + 0.0722f * px.linear[2];
+        ImGui::TextDisabled("%s (%u, %u)", tr("Pixel"), px.x, px.y);
+        ImGui::ColorButton("##swatch", {px.srgb[0] / 255.0f, px.srgb[1] / 255.0f, px.srgb[2] / 255.0f, 1.0f},
+                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha, {ImGui::GetFrameHeight() * 2.0f, ImGui::GetFrameHeight() * 2.0f});
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::Text("%s  %.4f  %.4f  %.4f", tr("HDR (linear)"), px.linear[0], px.linear[1], px.linear[2]);
+        ImGui::Text("%s  %.4f  %.4f  %.4f", tr("After exposure"), px.linear[0] * e, px.linear[1] * e, px.linear[2] * e);
+        ImGui::Text("%s  %.4f (%.4f)", tr("Luminance"), lum, lum * e);
+        ImGui::Text("%s  %u  %u  %u  #%02X%02X%02X", tr("Final sRGB"), px.srgb[0], px.srgb[1], px.srgb[2], px.srgb[0], px.srgb[1], px.srgb[2]);
+        ImGui::EndGroup();
+    }
+    if (!lookDev) ImGui::End();
 }
 
 void App::drawLanguageButton() {
@@ -3239,8 +3280,14 @@ void App::viewportInput() {
     const ImVec2 mouse = io.MousePos;
     const bool inside = mouse.x >= m_uiX && mouse.y >= m_uiY && mouse.x < m_uiX + m_uiW && mouse.y < m_uiY + m_uiH;
     const bool free = inside && !io.WantCaptureMouse;
-    const bool brushing = brushInput(free) || m_brushStroke || tilePaintInput(free) || m_tileStroke;
-    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing && !m_handleUsing && !brushing && !(io.KeyAlt && (brushActive() || tilePaintActive()))) {
+    if (m_pixelInspect && m_pixelAutoX >= 0 && !m_shot) { // --pixel
+        const f32 scale = ImGui::GetIO().DisplayFramebufferScale.x;
+        samplePixel(static_cast<f32>(m_pixelAutoX) / scale, static_cast<f32>(m_pixelAutoY) / scale, false);
+    }
+    const bool picking = m_pixelInspect && free; // the pixel inspector takes the left button: no selecting, brushes or tile paint
+    if (picking && (ImGui::IsMouseDown(ImGuiMouseButton_Left)) && !m_gizmoUsing) samplePixel(mouse.x, mouse.y, false);
+    const bool brushing = brushInput(free && !m_pixelInspect) || m_brushStroke || tilePaintInput(free && !m_pixelInspect) || m_tileStroke;
+    if (free && !m_pixelInspect && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing && !m_handleUsing && !brushing && !(io.KeyAlt && (brushActive() || tilePaintActive()))) {
         m_clickCandidate = true;
         m_clickX = mouse.x;
         m_clickY = mouse.y;
@@ -3875,8 +3922,19 @@ void App::drawLookDev() {
         const mkrhi::Texture texture = m_lookTarget ? m_renderer->renderTargetTexture(m_lookTarget) : mkrhi::Texture{};
         if (texture) ImGui::Image(ImTextureRef(static_cast<ImTextureID>(mkrhi::imguiTextureId(m_renderer->device(), texture))), {side, side});
         else ImGui::Dummy({side, side});
+        const ImVec2 imageMin = ImGui::GetItemRectMin();
+        if (m_pixelInspect) {
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && texture) {
+                const f32 k = static_cast<f32>(kLookSize) / side; // the image is shown at `side` points
+                const ImVec2 mouse = ImGui::GetIO().MousePos;
+                const f32 scale = ImGui::GetIO().DisplayFramebufferScale.x;
+                samplePixel(std::clamp((mouse.x - imageMin.x) * k / scale, 0.0f, (kLookSize - 1) / scale),
+                            std::clamp((mouse.y - imageMin.y) * k / scale, 0.0f, (kLookSize - 1) / scale), true);
+            }
+            if (m_pixelFrom == 2) drawPixelReadout(true);
+        }
         if (ImGui::IsItemHovered()) {
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            if (!m_pixelInspect && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
                 const ImVec2 d = ImGui::GetIO().MouseDelta;
                 m_lookYaw -= d.x * 0.01f;
                 m_lookPitch = std::clamp(m_lookPitch + d.y * 0.01f, -0.3f, 1.4f);

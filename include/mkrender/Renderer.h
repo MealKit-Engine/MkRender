@@ -293,6 +293,19 @@ inline constexpr u32 kUiAtlasSize = 2048;
 
 // Forward renderer (on top of the RHI, doesn't call graphics APIs directly). Processes 2 frames concurrently, and per-frame data
 // is written to the RHI upload ring. On integrated graphics (UMA) the upload memory is the memory the GPU reads, so there's no copy at all.
+// The pixel the inspector read (Renderer::inspectPixel). linear is the HDR scene color before post (linear, not clamped: bright lights go
+// over 1); exposure is the scale post multiplies it by (2^EV x brightness); srgb is the final output pixel (what the screen shows,
+// including anything drawn over the scene on the main view). valid is false until a read succeeds
+struct PixelInspect {
+    bool valid = false;
+    u32 x = 0, y = 0; // the pixel asked for
+    f32 linear[3] = {};
+    f32 exposure = 1.0f;
+    u8 srgb[3] = {};
+};
+// R11G11B10F (the HDR targets' format, red in the low bits) to floats. Negative values don't exist in it
+void unpackR11G11B10F(u32 packed, f32 out[3]);
+
 class Renderer {
 public:
     Renderer() = default;
@@ -390,6 +403,12 @@ public:
     // At this frame's endFrame, reads the offscreen target (drawn with drawToTarget) into out (sRGB 8-bit, waits for the GPU).
     // Reflection probe baking. out must live until endFrame. requestCapture in the same frame is deferred to the next frame
     void captureTarget(mkrhi::RenderTarget target, Image* out);
+
+    // Pixel inspector: at this frame's endFrame, reads one pixel and fills pixelInspect() (waits for the GPU, so ask only while the user
+    // is picking). target none = the main view and (x, y) is a back buffer pixel; else an offscreen target drawn with drawToTarget this
+    // frame and (x, y) is a pixel of its image. A frame with captureTarget/requestCapture reads nothing (valid stays false)
+    void inspectPixel(u32 x, u32 y, mkrhi::RenderTarget target = {});
+    const PixelInspect& pixelInspect() const;
 
     const char* adapterName() const;
     const GpuInfo& gpu() const;

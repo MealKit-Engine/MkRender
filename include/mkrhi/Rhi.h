@@ -171,6 +171,18 @@ struct Capture {
     std::vector<u8> rgba;
 };
 
+// One texel read at the end of the frame (pixel inspector). source = none reads the back buffer, else the color of an offscreen target
+// (it must have finished through endTarget this frame). texel is the 4 bytes as stored: R11G11B10F for TargetKind::Scene/Hdr,
+// RGBA8 (R first, the backend swizzles a BGRA swap chain) for TargetKind::Ldr and the back buffer. valid is false if the read failed
+// (outside the image, or the back buffer holds nothing this frame). Skipped on a frame that also has a Capture
+struct PixelRead {
+    RenderTarget source;
+    u32 x = 0, y = 0;
+    bool valid = false;
+    u8 texel[4] = {};
+};
+inline constexpr u32 kMaxPixelReads = 4;
+
 // GPU time (timestamp queries). The meaning of section numbers (0..kMaxGpuTimers-1) is decided by the user (renderer passes).
 // Results are from the most recent frame the GPU finished (kFramesInFlight frames late). Sections not used this frame are 0.
 inline constexpr u32 kMaxGpuTimers = 8;
@@ -266,7 +278,7 @@ public:
     u32 copyPitch(u32 width, u32 bytesPerPixel) const; // copyToTexture row pitch
     u32 copyAlignment() const;                         // copyToTexture start offset alignment
     // Submits and presents. If capture is given, waits for the GPU and reads the back buffer
-    void endFrame(bool vsync, Capture* capture = nullptr);
+    void endFrame(bool vsync, Capture* capture = nullptr, PixelRead* reads = nullptr, u32 readCount = 0);
     void waitIdle();
 
     const GpuTimes& gpuTimes() const;

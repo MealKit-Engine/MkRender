@@ -4,6 +4,7 @@
 #include "mkrhi/Rhi.h"
 #if MKRENDER_TESTS_RENDERER
 #include "mkrender/DrawList.h"
+#include "mkrender/Renderer.h"
 #endif
 
 #include <cmath>
@@ -169,6 +170,20 @@ void testCulling() {
     check(scratch.visible[0].size() == 2 && scratch.visible[1].empty(), "cullInstances keeps the instances inside");
     static_assert(sizeof(InstanceData) == 48 && sizeof(Particle) == 32 && sizeof(Sprite) == 80 && sizeof(UiQuad) == 112);
 }
+
+// The pixel inspector's decoder for the HDR targets' R11G11B10F texels (bits worked out by hand)
+void testPixelInspect() {
+    using mkrender::unpackR11G11B10F;
+    mkrender::f32 v[3];
+    unpackR11G11B10F(0x3C0u | (0x400u << 11) | (0x1C0u << 22), v); // 1.0, 2.0, 0.5
+    check(v[0] == 1.0f && v[1] == 2.0f && v[2] == 0.5f, "R11G11B10F: powers of two");
+    unpackR11G11B10F(0x3E0u | (0x3C0u << 11) | (0x1Eu << 22), v); // red 1.5, green 1.0, blue 1 + 14/32 at exponent 0 is not 1: 0x1E = exp 0, mantissa 30
+    check(v[0] == 1.5f && v[1] == 1.0f && std::abs(v[2] - std::ldexp(30.0f / 32.0f, -14)) < 1e-12f, "R11G11B10F: mantissa and denormal");
+    unpackR11G11B10F(0, v);
+    check(v[0] == 0.0f && v[1] == 0.0f && v[2] == 0.0f, "R11G11B10F: zero");
+    unpackR11G11B10F((30u << 6) | (30u << 17) | (30u << 27), v); // exponent 30: 2^15 x 1
+    check(v[0] == 32768.0f && v[1] == 32768.0f && v[2] == 32768.0f, "R11G11B10F: largest exponent");
+}
 #endif
 
 } // namespace
@@ -180,6 +195,7 @@ int main() {
     testTerrain();
 #if MKRENDER_TESTS_RENDERER
     testCulling();
+    testPixelInspect();
 #endif
     std::printf("%s: %d checks, %d failures\n", failures ? "FAIL" : "OK", checks, failures);
     return failures ? 1 : 0;

@@ -1202,7 +1202,7 @@ u32 Device::copyAlignment() const {
     return std::max<u32>(16, static_cast<u32>(m->properties.limits.optimalBufferCopyOffsetAlignment));
 }
 
-void Device::endFrame(bool vsync, Capture* capture) {
+void Device::endFrame(bool vsync, Capture* capture, PixelRead* reads, u32 readCount) {
     if (!m || !m->inFrame) return;
     m->endRendering();
     VkCommandBuffer cmd = m->current();
@@ -1231,6 +1231,41 @@ void Device::endFrame(bool vsync, Capture* capture) {
         vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &region);
         imageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                      source ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    }
+    // Pixel inspector: one texel each into a shared buffer (a capture frame skips them)
+    constexpr u32 kPixelSlot = 16;
+    VkBuffer pixelBuffer = VK_NULL_HANDLE;
+    VmaAllocation pixelAllocation = VK_NULL_HANDLE;
+    VmaAllocationInfo pixelInfo{};
+    if (capture || readCount > kMaxPixelReads) readCount = 0;
+    if (readCount && reads) {
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = static_cast<u64>(kPixelSlot) * readCount;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VK(vmaCreateBuffer(m->allocator, &bci, &aci, &pixelBuffer, &pixelAllocation, &pixelInfo));
+        for (u32 i = 0; i < readCount; ++i) {
+            PixelRead& read = reads[i];
+            read.valid = false;
+            const bool fromBack = !read.source;
+            if (fromBack && !m->imageIsTarget) continue; // nothing was drawn to the back buffer this frame
+            const Impl::TargetEntry* t = fromBack ? nullptr : &m->targets[read.source.id - 1];
+            const u32 w = t ? t->width : m->width, h = t ? t->height : m->height;
+            if (read.x >= w || read.y >= h) continue;
+            const VkImage image = t ? m->textures[t->texture - 1].image : s.image;
+            const VkImageLayout before = t ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : current;
+            imageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, before, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy region{};
+            region.bufferOffset = static_cast<u64>(i) * kPixelSlot;
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageOffset = {static_cast<i32>(read.x), static_cast<i32>(read.y), 0};
+            region.imageExtent = {1, 1, 1};
+            vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pixelBuffer, 1, &region);
+            imageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, before);
+            read.valid = true; // confirmed after the GPU finishes
+        }
     }
     if (!capture || source) {
         imageBarrier(cmd, s.image, VK_IMAGE_ASPECT_COLOR_BIT, current, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
@@ -1273,6 +1308,22 @@ void Device::endFrame(bool vsync, Capture* capture) {
         m->swapchainDirty = true;
     }
 
+    if (pixelBuffer) {
+        const bool done = waitFence(m->device, frame.fence, "pixel readback");
+        if (done) VK(vmaInvalidateAllocation(m->allocator, pixelAllocation, 0, VK_WHOLE_SIZE));
+        const u8* src = static_cast<const u8*>(pixelInfo.pMappedData);
+        for (u32 i = 0; i < readCount; ++i) {
+            if (!reads[i].valid) continue;
+            if (!done) {
+                reads[i].valid = false;
+                continue;
+            }
+            std::memcpy(reads[i].texel, src + static_cast<size_t>(i) * kPixelSlot, 4);
+            const bool bgra = m->swapchainBgra && !reads[i].source; // offscreen targets are RGBA8
+            if (bgra) std::swap(reads[i].texel[0], reads[i].texel[2]);
+        }
+        if (done) vmaDestroyBuffer(m->allocator, pixelBuffer, pixelAllocation); // if the wait timed out the GPU may still write: leave it
+    }
     if (readback) {
         if (!waitFence(m->device, frame.fence, "capture readback")) { capture->width = capture->height = 0; capture->rgba.clear(); return; }
         VK(vmaInvalidateAllocation(m->allocator, readbackAllocation, 0, VK_WHOLE_SIZE));

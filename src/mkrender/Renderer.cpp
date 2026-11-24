@@ -126,7 +126,8 @@ struct ForwardPush {
     u32 debugView = 0;   // render::DebugView (Forward.hlsl PSMain)
     u32 lightOffset = 0; // ring offset of 8 point light indices per instance (8 bytes, 0xFF = end) (read only when the frame has lights)
     u32 paletteOffset = 0; // skinned meshes: ring offset of the palette (48 bytes per joint)
-    u32 pad[2] = {};
+    u32 highlight = 0;   // material table index + 1 to tint (Forward.hlsl PSMain), 0 = none
+    u32 pad = 0;
     f32 boxCenter[4] = {}; // mesh draws: quantization box (GpuVertex position = center + snorm * extent)
     f32 boxExtent[4] = {};
 };
@@ -356,6 +357,7 @@ struct Renderer::Impl {
     void drawSky(const FrameParams& p); // after writing frame constants, before 3D (sky HDRI, or the fog → sky color gradient)
     LightingModel lighting = LightingModel::Pbr;
     DebugView debugView = DebugView::None;
+    u32 highlight = 0; // FrameParams::highlightMaterial + 1 (0 = none)
     // Shader hot reload swaps only the bytecode and rebuilds. The VS of every forwardDesc[n] is the same
     mkrhi::PipelineDesc forwardDesc[kLightingModelCount], outlineDesc, uiDesc;
     ShaderReloadAdd shaderReloadAdd; // RendererDesc::shaderReload (host's hot reload)
@@ -838,6 +840,7 @@ bool Renderer::beginFrame(const FrameParams& p) {
 
     const Vec3 sky = lerp(p.fogColor, p.tintColor, std::clamp(p.tintAmount, 0.0f, 1.0f)); // the background gets the flash too
     m->debugView = supportsDebugView(p.debugView) ? p.debugView : DebugView::None;
+    m->highlight = p.highlightMaterial == kNoHighlight ? 0 : p.highlightMaterial + 1;
     const bool overdraw = m->debugView == DebugView::Overdraw;
     const f32 clear[4] = {overdraw ? 0.0f : sky.x, overdraw ? 0.0f : sky.y, overdraw ? 0.0f : sky.z, 1.0f};
     m->flushUploads(); // toon ramp/UI atlases (copies happen before binding draw targets)
@@ -1424,9 +1427,11 @@ void Renderer::drawToTarget(mkrhi::RenderTarget target, const FrameParams& p, co
     const u64 frameOffset = m->frameOffset;
     const Frustum frustum = m->frustum;
     const DebugView debugView = m->debugView;
+    const u32 highlight = m->highlight;
     const LightingModel projectLighting = m->lighting;
     std::vector<PointLight> frameLights = m->frameLights;
     m->debugView = DebugView::None;
+    m->highlight = p.highlightMaterial == kNoHighlight ? 0 : p.highlightMaterial + 1;
     m->lighting = lighting;
     m->writeFrameConstants(p, &m->frameOffset, false); // offscreen without shadows (lookdev, reflection probe baking)
     m->frustum = Frustum::fromViewProj(p.viewProj);
@@ -1447,6 +1452,7 @@ void Renderer::drawToTarget(mkrhi::RenderTarget target, const FrameParams& p, co
     m->frameOffset = frameOffset;
     m->frustum = frustum;
     m->debugView = debugView;
+    m->highlight = highlight;
     m->lighting = projectLighting;
     m->frameLights = std::move(frameLights);
 }
@@ -1535,6 +1541,7 @@ void Renderer::Impl::drawMesh(MeshId meshId, const InstanceData* instances, u32 
     ForwardPush push{device.uploadBufferIndex(), static_cast<u32>(frameOffset), static_cast<u32>(offset),
                      static_cast<u32>(debugView), static_cast<u32>(lightOffset)};
     push.paletteOffset = paletteOffset;
+    push.highlight = highlight;
     mesh.setBox(push);
     if (mesh.skinned) cmd.setPipeline(scenePipeline(true));
     cmd.pushConstants(&push, sizeof(push));

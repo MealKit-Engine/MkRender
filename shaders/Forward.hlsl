@@ -86,7 +86,8 @@ struct PushConstants
     uint debugView;      // render::DebugView: 0 none, 1 wireframe, 2 normals, 3 LOD, 4 overdraw, 5 budget, 6 material features, 7+ DEBUG_VIEWS only
     uint lightOffset;    // ring offset of 8 point light indices per instance (bytes, 0xFF = end)
     uint paletteOffset;  // skinned mesh: ring offset of the joint palette (three rows per joint = 48 bytes)
-    uint2 pad;
+    uint highlight;      // material table index + 1 to tint (Look Dev [Materials] page), 0 = none
+    uint pad;
     float4 boxCenter;    // mesh quantization box: position = boxCenter + snorm * boxExtent (Renderer.cpp GpuVertex)
     float4 boxExtent;
 };
@@ -651,6 +652,9 @@ float4 PSMain(VSOutput input) : SV_Target
 
     if (input.flags & 2u) // editor selection highlight
         color = lerp(color, float3(1.0, 0.45, 0.05), 0.45) + float3(0.08, 0.03, 0.0);
+
+    if (pc.highlight != 0u && pc.highlight - 1u == input.material) // Look Dev [Materials] page: the clicked material
+        color = lerp(color, float3(0.1, 0.9, 1.0), 0.55) + float3(0.0, 0.05, 0.08);
 
     return finishColor(frame, input, color);
 }

@@ -38,6 +38,7 @@ inline constexpr u32 kInstanceLodShift = 8;    // editor view mode Lod: bits 8~9
 // Per-instance style values (upper 16 bits of flags, the instance stays 48 bytes): changed by view/ from tick events
 inline constexpr u32 kInstanceFlashShift = 16;    // bits 16~23: flash 0..1 (blended toward white, all materials)
 inline constexpr u32 kInstanceDissolveShift = 24; // bits 24~31: dissolve progress 0..1 (kMaterialDissolve materials only)
+inline constexpr u32 kNoHighlight = 0xFFFFFFFFu;   // FrameParams::highlightMaterial: no material tinted
 inline u32 instanceUnit8(f32 amount) { return static_cast<u32>((amount < 0.0f ? 0.0f : amount > 1.0f ? 1.0f : amount) * 255.0f + 0.5f); }
 // Puts a flash into flags: out.add(mesh, {..., instanceFlash(flags, 0.8f)})
 inline u32 instanceFlash(u32 flags, f32 amount) { return (flags & ~(0xFFu << kInstanceFlashShift)) | (instanceUnit8(amount) << kInstanceFlashShift); }
@@ -195,6 +196,8 @@ struct FrameParams {
     Vec3 tintColor{1.0f, 1.0f, 1.0f};
     f32 tintAmount = 0.0f;
     DebugView debugView = DebugView::None; // editor view mode
+    // Tints the pixels of one material (Renderer::createMaterial index) so a tool can show where it is used (Look Dev [Materials]). kNoHighlight = none
+    u32 highlightMaterial = kNoHighlight;
     // View time (seconds, wind sway). Graphics regression tests keep it at 0
     f32 time = 0.0f;
     Vec3 windDirection{1.0f, 0.0f, 0.3f}; // horizontal direction (the renderer normalizes it)

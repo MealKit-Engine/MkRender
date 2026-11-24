@@ -3,17 +3,9 @@
 Only work that is left. When an item is done, remove it here and describe it in the engine's `docs/CHANGELOG.md` under the item's name (MkRender versions are in `git log`).
 Sources: engine `docs/ROADMAP.md` "Scene editing in MkRender, leftovers", "MkRender leftovers" and "Design refresh for the rest of the suite"; engine `docs/TOOL_DESIGN.md` sections 6 and 7; the scene tree, inspector and viewport items of the engine's "Editor usability" list (moved here 2026-11-22, sections 4 and 5; numbers are those of the 2026-11-04 list).
 
-**Suggested order**: 1, then 3; 4 one piece at a time when scenes grow (FuseTag maps).
+Only work an agent can do without a person is listed here. MkRender's hand checks (the screenshot beside the editor at the same DPI for TOOL_DESIGN section 6 item 7, dragging a `gizmo=radius` handle) and the decision whether to publish MkRender as a product of its own are in the engine's `docs/ROADMAP_HUMAN.md` (moved 2026-11-24).
 
-## 1. Suite look (engine TOOL_DESIGN section 6 checklist)
-
-MkRender has the Spectrum 2 tokens, the icon font, icon buttons, the dark title bar, the app icon, outlined checkboxes, panel tab icons, right-click items for its icon actions and the empty states (engine CHANGELOG "Design refresh ... part 6" and "part 8"). Left:
-
-- [ ] Section 6 item 7: a screenshot beside the editor at the same DPI, then update the MkRender row of TOOL_DESIGN section 7.
-
-## 3. Later
-
-- [ ] Publishing MkRender as a product of its own: to decide now that its render goldens run without the engine (engine `docs/DECISIONS.md` 2026-11-12).
+**Suggested order**: 4 one piece at a time when scenes grow (FuseTag maps).
 
 ## 4. Usability items moved from the editor (2026-11-22)
 

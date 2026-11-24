@@ -281,12 +281,19 @@ struct Shot {
     const char* name;
     LightingModel lighting;
     bool sprites; // the 2D front view with sprites instead of the 3D scene
+    DebugView view = DebugView{}; // an editor view mode (DebugView::None is an X11 macro here) (built with MKRENDER_DEBUG_VIEWS)
 };
 constexpr Shot kShots[] = {
     {"lit_pbr", LightingModel::Pbr, false},
     {"lit_toon", LightingModel::Toon, false},
     {"lit_unlit", LightingModel::Unlit, false},
     {"sprites", LightingModel::Unlit, true},
+#if MKRENDER_DEBUG_VIEWS
+    {"view_base_color", LightingModel::Pbr, false, DebugView::BaseColor},
+    {"view_roughness", LightingModel::Pbr, false, DebugView::Roughness},
+    {"view_sun_only", LightingModel::Pbr, false, DebugView::SunOnly},
+    {"view_shadow_cascades", LightingModel::Pbr, false, DebugView::ShadowCascades},
+#endif
 };
 
 FrameParams frameFor(const Shot& shot, std::vector<PointLight>& lights) {
@@ -308,6 +315,7 @@ FrameParams frameFor(const Shot& shot, std::vector<PointLight>& lights) {
         f.lights = lights.data();
         f.lightCount = static_cast<u32>(lights.size());
     }
+    f.debugView = shot.view;
     f.time = 0.0f; // wind and anything time based stay still
     return f;
 }
@@ -431,6 +439,7 @@ int main(int argc, char** argv) {
     desc.width = kWidth;
     desc.height = kHeight;
     desc.vsync = false;
+    desc.debugViews = true; // the view mode shots
     if (!window || !renderer.init(desc)) {
         std::printf("SKIP mkrender_golden (%s): no GPU device (%s)\n", mkrhi::backendName(), window ? renderer.initError() : "no window");
         return 0;

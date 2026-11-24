@@ -54,6 +54,17 @@ enum class DebugView : u8 {
     Overdraw,  // number of times the same pixel was drawn = brightness (additive without depth test)
     Budget,    // models over budget red, the rest gray
     Features,  // material features: outline red, wind green, rim blue, dissolve yellow (summed when combined), none gray
+    // The modes below are built only with MKRENDER_DEBUG_VIEWS (their shader code is not in shipping builds) and use the PBR shader
+    BaseColor,       // base color after texture and factor, before lighting
+    Roughness,       // roughness as gray
+    Metallic,        // metallic as gray
+    Emissive,        // emissive color only
+    SunOnly,         // sun diffuse + specular with its shadow, no ambient or reflections
+    AmbientOnly,     // ambient diffuse (sky/HDRI light on the surface)
+    ReflectionsOnly, // environment reflection (probe/HDRI specular)
+    ShadowCascades,  // sun shadow cascade: 0 green, 1 yellow, beyond the shadow distance gray
+    MipLevel,        // mip level the base color is sampled from: blue (0) to red (5 or more)
+    TexelDensity,    // base color texels per meter: blue 16 or fewer, green 256, red 4096 or more
     Count
 };
 

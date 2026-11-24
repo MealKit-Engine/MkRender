@@ -14,6 +14,9 @@
 #ifndef LIGHTING_MODEL
 #define LIGHTING_MODEL 0
 #endif
+#ifndef DEBUG_VIEWS
+#define DEBUG_VIEWS 0 // 1: the view modes that exist only in builds with the debug UI (g_ForwardDebugPS)
+#endif
 
 static const uint kMaterialOutline = 1u; // render::kMaterial* (Renderer.h)
 static const uint kMaterialWind = 2u;
@@ -80,7 +83,7 @@ struct PushConstants
     uint ring;           // g_buffers[] index of the upload ring
     uint frameOffset;    // FrameConstants offset
     uint instanceOffset; // offset of this draw's Instance array
-    uint debugView;      // render::DebugView: 0 none, 1 wireframe, 2 normals, 3 LOD, 4 overdraw, 5 budget, 6 material features
+    uint debugView;      // render::DebugView: 0 none, 1 wireframe, 2 normals, 3 LOD, 4 overdraw, 5 budget, 6 material features, 7+ DEBUG_VIEWS only
     uint lightOffset;    // ring offset of 8 point light indices per instance (bytes, 0xFF = end)
     uint paletteOffset;  // skinned mesh: ring offset of the joint palette (three rows per joint = 48 bytes)
     uint2 pad;
@@ -418,6 +421,29 @@ float sunShadow(FrameConstants f, float3 worldPos, float3 n)
     return lerp(1.0, lit, fade);
 }
 
+#if DEBUG_VIEWS
+// Editor view modes that exist only in builds with the debug UI (MKRENDER_DEBUG_VIEWS: g_ForwardDebugPS). 0 blue .. 1 red through cyan, green and yellow
+float3 heatRamp(float t)
+{
+    t = saturate(t) * 4.0;
+    float3 c = lerp(float3(0.1, 0.25, 1.0), float3(0.0, 0.85, 0.9), saturate(t));
+    c = lerp(c, float3(0.2, 0.85, 0.2), saturate(t - 1.0));
+    c = lerp(c, float3(0.95, 0.85, 0.1), saturate(t - 2.0));
+    return lerp(c, float3(0.95, 0.15, 0.1), saturate(t - 3.0));
+}
+
+// The cascade sunShadow reads for this pixel: 0 or 1, 2 beyond the shadow distance or with shadows off
+uint shadowCascadeAt(FrameConstants f, float3 worldPos)
+{
+    if (f.shadow.y == 0)
+        return 2;
+    float viewDepth = dot(worldPos - f.cameraPos.xyz, f.shadowForward.xyz);
+    if (viewDepth >= f.shadowSplits.y)
+        return 2;
+    return (viewDepth < f.shadowSplits.x || f.shadow.y == 1) ? 0 : 1;
+}
+#endif
+
 // Specular integral over roughness and view angle (Karis's approximation, no lookup texture)
 float3 envBrdf(float3 f0, float roughness, float ndv)
 {
@@ -527,6 +553,45 @@ float4 PSMain(VSOutput input) : SV_Target
             tint = float3(0.45, 0.45, 0.45);
         return float4(saturate(tint) * (0.35 + 0.65 * halfLambert), 1.0);
     }
+#if DEBUG_VIEWS
+    if (pc.debugView >= 7 && pc.debugView <= 10) // base color, roughness, metallic, emissive: the surface values before lighting
+    {
+        if (pc.debugView == 7)
+            return float4(albedo, 1.0);
+        if (pc.debugView == 8)
+            return float4(roughness.xxx, 1.0);
+        if (pc.debugView == 9)
+            return float4(metallic.xxx, 1.0);
+        return float4(emissive, 1.0);
+    }
+    if (pc.debugView == 14) // shadow cascades: 0 green, 1 yellow, none gray
+    {
+        uint c = shadowCascadeAt(frame, input.worldPos);
+        float3 tint = c == 0 ? float3(0.2, 0.8, 0.25) : (c == 1 ? float3(0.95, 0.8, 0.15) : float3(0.5, 0.5, 0.5));
+        return float4(tint * (0.35 + 0.65 * halfLambert), 1.0);
+    }
+    if (pc.debugView == 15 || pc.debugView == 16) // mip level and texel density of the base color texture (dark gray: no texture)
+    {
+        float3 tint = float3(0.25, 0.25, 0.25);
+        if (mat.textures.x != kNoTexture)
+        {
+            Texture2D tex = g_textures[NonUniformResourceIndex(mat.textures.x)];
+            if (pc.debugView == 15)
+                tint = heatRamp(tex.CalculateLevelOfDetail(g_linearWrap, input.uv) / 5.0);
+            else
+            {
+                float w, h;
+                tex.GetDimensions(w, h);
+                float2 tx = ddx(input.uv) * float2(w, h), ty = ddy(input.uv) * float2(w, h);
+                float texelArea = abs(tx.x * ty.y - tx.y * ty.x); // texels per pixel
+                float worldArea = length(cross(ddx(input.worldPos), ddy(input.worldPos))); // square meters per pixel
+                float density = sqrt(texelArea / max(worldArea, 1e-12)); // texels per meter
+                tint = heatRamp((log2(max(density, 1.0)) - 4.0) / 8.0); // 16 -> blue, 256 -> green, 4096 -> red
+            }
+        }
+        return float4(tint * (0.35 + 0.65 * halfLambert), 1.0);
+    }
+#endif
 
     float3 ambient = ambientLight(frame, n);
     float3 v = normalize(frame.cameraPos.xyz - input.worldPos);
@@ -551,6 +616,14 @@ float4 PSMain(VSOutput input) : SV_Target
     float3 diffuse = albedo * (1.0 - metallic);
     float3 ambientSpecular = hasReflection(frame, input.probe) ? reflection(frame, reflect(-v, n), roughness, input.probe) * envBrdf(f0, roughness, ndv)
                                               : f0 * ambient * (1.0 - roughness * 0.7); // old approximation without an HDRI
+#if DEBUG_VIEWS
+    if (pc.debugView == 11) // sun only: diffuse and specular with the shadow
+        return float4(diffuse * frame.sunColor.rgb * (halfLambert * halfLambert * shadow) + specular * frame.sunColor.rgb * shadow, 1.0);
+    if (pc.debugView == 12) // ambient only
+        return float4(diffuse * ambient, 1.0);
+    if (pc.debugView == 13) // reflections only
+        return float4(ambientSpecular, 1.0);
+#endif
     float3 color = diffuse * (frame.sunColor.rgb * (halfLambert * halfLambert * shadow) + ambient) + specular * frame.sunColor.rgb * shadow +
                    ambientSpecular + emissive + pointLights(frame, input.lights, input.worldPos, n, v, diffuse, f0, roughness);
 #elif LIGHTING_MODEL == 1

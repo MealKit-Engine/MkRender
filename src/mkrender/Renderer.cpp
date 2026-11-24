@@ -9,6 +9,9 @@
 #include <string>
 #include <vector>
 
+#if MKRENDER_DEBUG_VIEWS
+#include "g_ForwardDebugPS.h"
+#endif
 #include "g_ForwardPbrPS.h"
 #include "g_ForwardToonPS.h"
 #include "g_ForwardUnlitPS.h"
@@ -258,6 +261,10 @@ struct Renderer::Impl {
     mkrhi::Pipeline forwardSkin[kLightingModelCount], outlineSkin, shadowSkin, wireSkin, overdrawSkin;
     mkrhi::PipelineDesc forwardSkinDesc[kLightingModelCount], outlineSkinDesc, shadowSkinDesc;
     mkrhi::Pipeline forwardWire, forwardOverdraw; // editor view modes (debug UI builds only, PBR shader)
+#if MKRENDER_DEBUG_VIEWS
+    mkrhi::Pipeline forwardDebug, forwardDebugSkin; // DebugView::BaseColor and later: the PBR shader with DEBUG_VIEWS=1 (g_ForwardDebugPS)
+    mkrhi::PipelineDesc forwardDebugDesc, forwardDebugSkinDesc;
+#endif
     mkrhi::Pipeline ui;
     mkrhi::Pipeline particles; // shaders/Particle.hlsl (after opaque 3D, no depth writes)
     mkrhi::PipelineDesc particleDesc;
@@ -433,6 +440,12 @@ struct Renderer::Impl {
             {"Post.hlsl", &uber, &uberDesc, "VSMain", "PSUber", ""},
         };
         reloads.insert(reloads.end(), std::begin(others), std::end(others));
+#if MKRENDER_DEBUG_VIEWS
+        if (debugViews) {
+            reloads.push_back({"Forward.hlsl", &forwardDebug, &forwardDebugDesc, "VSMain", "PSMain", "LIGHTING_MODEL=0 -D DEBUG_VIEWS=1"});
+            reloads.push_back({"Forward.hlsl", &forwardDebugSkin, &forwardDebugSkinDesc, "VSMain", "PSMain", "LIGHTING_MODEL=0 -D DEBUG_VIEWS=1 -D SKINNED=1"});
+        }
+#endif
         for (const Reload& r : reloads) {
             const bool viewModeSource = r.desc == &forwardDesc[0] || r.desc == &forwardSkinDesc[0];
             shaderReloadAdd(r.file, r.vs, r.ps, r.defines, [this, r, viewModeSource](const mkrhi::ShaderCode& vs, const mkrhi::ShaderCode& ps) {
@@ -476,6 +489,9 @@ struct Renderer::Impl {
     }
 
     mkrhi::Pipeline& scenePipeline(bool skinned = false) {
+#if MKRENDER_DEBUG_VIEWS
+        if (debugView >= DebugView::BaseColor) return skinned ? forwardDebugSkin : forwardDebug;
+#endif
         if (skinned)
             return debugView == DebugView::Wireframe ? wireSkin
                    : debugView == DebugView::Overdraw ? overdrawSkin
@@ -536,6 +552,11 @@ bool Renderer::init(const RendererDesc& desc) {
     if (m->debugViews) {
         m->forwardWire = m->device.createPipeline(m->wireDesc());
         m->forwardOverdraw = m->device.createPipeline(m->overdrawDesc());
+#if MKRENDER_DEBUG_VIEWS
+        m->forwardDebugDesc = m->forwardDesc[0];
+        m->forwardDebugDesc.ps = {g_ForwardDebugPS, sizeof(g_ForwardDebugPS)};
+        m->forwardDebug = m->device.createPipeline(m->forwardDebugDesc);
+#endif
     }
 
     mkrhi::PipelineDesc ui;
@@ -573,6 +594,10 @@ bool Renderer::init(const RendererDesc& desc) {
     if (m->debugViews) {
         m->wireSkin = m->device.createPipeline(skinnedDesc(m->wireDesc(), skinVS));
         m->overdrawSkin = m->device.createPipeline(skinnedDesc(m->overdrawDesc(), skinVS));
+#if MKRENDER_DEBUG_VIEWS
+        m->forwardDebugSkinDesc = skinnedDesc(m->forwardDebugDesc, skinVS);
+        m->forwardDebugSkin = m->device.createPipeline(m->forwardDebugSkinDesc);
+#endif
     }
     mkrhi::PipelineDesc particles;
     particles.vs = {g_ParticleVS, sizeof(g_ParticleVS)};
@@ -890,7 +915,8 @@ static Vec3 transformPoint(const f32 m[16], Vec3 v) {
 // to texels so shadow edges don't shimmer when the camera rotates or moves. 100 m more toward the light so off-screen objects' shadows are received too
 void Renderer::Impl::computeCascades(const FrameParams& p, FrameConstants& fc) {
     const ShadowSettings& s = shadowSettings;
-    if (!s.enabled || debugView != DebugView::None || !shadowPipeline) return;
+    const bool viewNeedsShadow = debugView == DebugView::None || debugView == DebugView::SunOnly || debugView == DebugView::ShadowCascades;
+    if (!s.enabled || !viewNeedsShadow || !shadowPipeline) return;
     const u32 cascades = s.cascades, size = s.size;
     if (!shadowTarget || shadowTargetSize != size || shadowTargetCascades != cascades) {
         shadowTarget = device.createDepthTarget(size * cascades, size);
@@ -1702,6 +1728,9 @@ void Renderer::addCulled(u32 count) {
 bool Renderer::supportsDebugView(DebugView view) const {
     if (view == DebugView::None) return true;
     if (!m || view >= DebugView::Count) return false;
+#if !MKRENDER_DEBUG_VIEWS
+    if (view >= DebugView::BaseColor) return false; // built without their shader (MKRENDER_DEBUG_VIEWS off)
+#endif
     return m->debugViews; // without them (shipping builds) only None
 }
 mkrhi::GpuMemory Renderer::gpuMemory() const { return m ? m->device.gpuMemory() : mkrhi::GpuMemory{}; }

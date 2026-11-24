@@ -344,7 +344,7 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--render-golden") == 0 && i + 2 < argc) goldenShots = argv[++i], goldenOut = argv[++i];
         else if (std::strcmp(argv[i], "--check-scene") == 0 && i + 1 < argc) return checkScene(argv[++i]);
         else if (std::strcmp(argv[i], "--check-terrain") == 0 && i + 1 < argc) return checkTerrain(argv[++i]);
-        else if (std::strcmp(argv[i], "--view-mode") == 0 && i + 1 < argc) viewMode = std::atoi(argv[++i]); // 0 lit .. 6 material features
+        else if (std::strcmp(argv[i], "--view-mode") == 0 && i + 1 < argc) viewMode = std::atoi(argv[++i]); // 0 lit .. 16 texel density (render::DebugView)
         else if (std::strcmp(argv[i], "--lighting") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
             lighting = v == "toon" ? 1 : v == "unlit" ? 2 : 0;

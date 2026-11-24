@@ -2474,6 +2474,16 @@ constexpr ViewModeInfo kViewModes[] = {
     {"Overdraw", "Brighter where the same pixel is drawn more times"},
     {"Over Budget", "Red: over the model budget of mealkit.project"},
     {"Material Features", "Outline red, wind green, rim blue, dissolve yellow, none gray"},
+    {"Base Color", "The color before lighting: texture times factor"},
+    {"Roughness", "White is rough, black is smooth"},
+    {"Metallic", "White is metal, black is not"},
+    {"Emissive", "Only the light a material gives off"},
+    {"Sun Only", "Sun diffuse and highlight with its shadow, no sky light or reflections"},
+    {"Ambient Only", "Sky light on the surface, no sun or reflections"},
+    {"Reflections Only", "Environment reflections only"},
+    {"Shadow Cascades", "Sun shadow cascade: 0 green, 1 yellow, gray beyond the shadow distance"},
+    {"Mip Level", "Mip level of the base color: blue is full size, red is 5 or smaller, dark gray has no texture"},
+    {"Texel Density", "Base color texels per meter: blue 16 or fewer, green 256, red 4096 or more"},
 };
 static_assert(sizeof(kViewModes) / sizeof(kViewModes[0]) == static_cast<size_t>(DebugView::Count), "one name per DebugView");
 } // namespace

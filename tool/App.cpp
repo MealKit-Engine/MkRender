@@ -1004,6 +1004,12 @@ bool App::entityBounds(const Entity& e, Vec3& lo, Vec3& hi) {
     if (isMarker(e) || e.is(kKindScatter)) return false;
     lo = {-0.5f, -0.5f, -0.5f};
     hi = {0.5f, 0.5f, 0.5f};
+    if (e.is(kKindTilemap)) { // the grid from its bottom left corner (the object's position)
+        const TileGrid g = tileGrid(e);
+        lo = {0.0f, 0.0f, -0.02f};
+        hi = {static_cast<f32>(g.width) * g.cellSize, static_cast<f32>(g.height) * g.cellSize, 0.02f};
+        return true;
+    }
     if (e.is(kKindSprite)) {
         f32 px = 0.5f, py = 0.5f;
         parseFloat(e.field("pivotX"), px);
@@ -1826,6 +1832,34 @@ void App::addScene(DrawList& list) {
             list.add(s.mesh, inst);
             continue;
         }
+        if (e.is(kKindTilemap)) { // one sprite quad per painted cell (the game draws the same cells, render::addTilemap)
+            const std::string image = e.field("image");
+            if (image.empty()) continue;
+            const TileGrid g = tileGrid(e);
+            const std::vector<int> tiles = parseTileCells(e.field("cells"), g.width, g.height);
+            for (int r = 0; r < g.height; ++r) {
+                for (int c = 0; c < g.width; ++c) {
+                    const int tile = tiles[static_cast<size_t>(r) * static_cast<size_t>(g.width) + static_cast<size_t>(c)];
+                    if (tile < 0) continue;
+                    const SpriteEntry& s = m_assets.sprite(image, g.columns, g.rows, tile, 0.0f, 0.0f, false, false);
+                    if (s.mesh == kNoMesh) {
+                        if (std::find(m_modelProblems.begin(), m_modelProblems.end(), s.error) == m_modelProblems.end()) {
+                            m_modelProblems.push_back(s.error);
+                            log("Tilemap " + e.name + ": " + s.error);
+                        }
+                        goto nextEntity;
+                    }
+                    InstanceData inst;
+                    inst.color = e.color;
+                    inst.flags = isSelected(e.id) ? kInstanceHighlight : 0u;
+                    inst.position = {w.position.x + static_cast<f32>(c) * g.cellSize, w.position.y + static_cast<f32>(g.height - 1 - r) * g.cellSize, w.position.z};
+                    inst.scale = {g.cellSize, g.cellSize, 1.0f};
+                    list.add(s.mesh, inst);
+                }
+            }
+        nextEntity:
+            continue;
+        }
         if (e.is(kKindScatter)) {
             const std::string model = e.field("model"), file = e.field("file");
             if (model.empty() || file.empty()) continue;
@@ -1862,7 +1896,7 @@ void App::addScene(DrawList& list) {
             m_lights.push_back(l);
             continue;
         }
-        if (isMarker(e) || isArea(e) || e.is(kKindScatter) || e.is(kKindSprite)) continue;
+        if (isMarker(e) || isArea(e) || e.is(kKindScatter) || e.is(kKindSprite) || e.is(kKindTilemap)) continue;
         InstanceData inst;
         inst.color = e.color;
         inst.flags = e.flags & ~kInstanceHighlight;
@@ -2229,7 +2263,11 @@ void App::drawMenu() {
                     m_selected = 0;
                 }
             }
-            if (ImGui::IsKeyPressed(ImGuiKey_B)) m_brushOn = !m_brushOn; // terrain/scatter brush of the selected object
+            if (ImGui::IsKeyPressed(ImGuiKey_B)) { // terrain/scatter brush or the tile brush of the selected object
+                const Entity* sel = m_scene.find(m_selected);
+                if (sel && sel->is(kKindTilemap)) m_tileOn = !m_tileOn;
+                else m_brushOn = !m_brushOn;
+            }
             if (ImGui::IsKeyPressed(ImGuiKey_G)) {
                 m_showGrid = !m_showGrid;
                 savePrefs();
@@ -2783,6 +2821,7 @@ void App::drawInspector() {
             if (checkbox("##checker", &checker)) e.flags = checker ? e.flags | kInstanceChecker : e.flags & ~kInstanceChecker;
             if (e.is(kKindScatter) || e.is(kKindTerrain)) drawBrushInspector(e);
             if (e.is(kKindSprite)) drawSpriteInspector(e);
+            if (e.is(kKindTilemap)) drawTilemapInspector(e);
             if (!e.model.empty()) {
                 const ModelEntry& m = m_assets.model(e.model);
                 if (m.ok && m.skinned()) {
@@ -3190,8 +3229,8 @@ void App::viewportInput() {
     const ImVec2 mouse = io.MousePos;
     const bool inside = mouse.x >= m_uiX && mouse.y >= m_uiY && mouse.x < m_uiX + m_uiW && mouse.y < m_uiY + m_uiH;
     const bool free = inside && !io.WantCaptureMouse;
-    const bool brushing = brushInput(free) || m_brushStroke;
-    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing && !m_handleUsing && !brushing && !(io.KeyAlt && brushActive())) {
+    const bool brushing = brushInput(free) || m_brushStroke || tilePaintInput(free) || m_tileStroke;
+    if (free && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_gizmoUsing && !m_handleUsing && !brushing && !(io.KeyAlt && (brushActive() || tilePaintActive()))) {
         m_clickCandidate = true;
         m_clickX = mouse.x;
         m_clickY = mouse.y;
@@ -3295,6 +3334,37 @@ constexpr PivotPreset kPivots[9] = {{trn("Top left"), 0.0f, 1.0f},    {trn("Top"
                                     {trn("Bottom left"), 0.0f, 0.0f}, {trn("Bottom"), 0.5f, 0.0f}, {trn("Bottom right"), 1.0f, 0.0f}};
 } // namespace
 
+bool App::imagePicker(Entity& e, const char* id) {
+    const std::string image = e.field("image");
+    bool changed = false;
+    row(tr("Image"));
+    if (ImGui::BeginCombo(id, image.empty() ? tr("(none)") : image.c_str(), ImGuiComboFlags_HeightLarge)) {
+        static char search[64];
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##search", tr("Search"), search, sizeof(search));
+        const std::string s = lower(search);
+        const f32 side = ImGui::GetTextLineHeight() * 1.6f;
+        for (const std::string& f : m_assets.files(".png")) {
+            if (!s.empty() && lower(f).find(s) == std::string::npos) continue;
+            ImGui::PushID(f.c_str());
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            if (ImGui::Selectable("##pick", f == image, 0, {0.0f, side})) {
+                e.setField("image", f);
+                changed = true;
+            }
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            if (const u64 picture = m_showThumbs ? thumbnail(f) : 0)
+                draw->AddImage(ImTextureRef(static_cast<ImTextureID>(picture)), at, {at.x + side, at.y + side});
+            draw->AddText({at.x + side + ImGui::GetStyle().ItemSpacing.x, at.y + (side - ImGui::GetTextLineHeight()) * 0.5f},
+                          ImGui::GetColorU32(ImGuiCol_Text), f.c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
 void App::drawSpriteInspector(Entity& e) {
     form::section(tr("Sprite"));
     const std::vector<SpriteClipRow>& clips = m_assets.spriteClips();
@@ -3318,28 +3388,7 @@ void App::drawSpriteInspector(Entity& e) {
         return;
     }
     const std::string image = e.field("image");
-    row(tr("Image"));
-    if (ImGui::BeginCombo("##image", image.empty() ? tr("(none)") : image.c_str(), ImGuiComboFlags_HeightLarge)) {
-        static char search[64];
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputTextWithHint("##search", tr("Search"), search, sizeof(search));
-        const std::string s = lower(search);
-        const f32 side = ImGui::GetTextLineHeight() * 1.6f;
-        for (const std::string& f : m_assets.files(".png")) {
-            if (!s.empty() && lower(f).find(s) == std::string::npos) continue;
-            ImGui::PushID(f.c_str());
-            const ImVec2 at = ImGui::GetCursorScreenPos();
-            if (ImGui::Selectable("##pick", f == image, 0, {0.0f, side})) e.setField("image", f);
-            ImDrawList* draw = ImGui::GetWindowDrawList();
-            if (const u64 picture = m_showThumbs ? thumbnail(f) : 0)
-                draw->AddImage(ImTextureRef(static_cast<ImTextureID>(picture)), at, {at.x + side, at.y + side});
-            draw->AddText({at.x + side + ImGui::GetStyle().ItemSpacing.x, at.y + (side - ImGui::GetTextLineHeight()) * 0.5f},
-                          ImGui::GetColorU32(ImGuiCol_Text), f.c_str());
-            ImGui::PopID();
-        }
-        ImGui::EndCombo();
-    }
+    imagePicker(e, "##image");
     if (image.empty()) {
         ImGui::TextDisabled(tr("Pick a PNG here, or drag one from Assets into the view."));
         return;
@@ -3430,6 +3479,175 @@ void App::drawSpritePivot(Entity& e) {
     }
     ImGui::SetCursorScreenPos({start.x, start.y + (button + 2.0f) * 3.0f});
     ImGui::Dummy({0.0f, 0.0f});
+}
+
+// ---------------------------------------------------------------- Tilemaps
+
+bool App::tilePaintActive() const {
+    const Entity* e = m_scene.find(m_selected);
+    return m_tileOn && e && m_selection.size() <= 1 && e->is(kKindTilemap) && !e->field("image").empty();
+}
+
+// Left button paints the picked tile, shift or the right button erases, alt belongs to the camera. One stroke = one undo step (snapshot
+// runs when no button is down). Cells are written back as the object's `cells` text, so nothing else is needed to save
+bool App::tilePaintInput(bool free) {
+    m_tileHit = false;
+    if (!tilePaintActive()) {
+        m_tileStroke = false;
+        return false;
+    }
+    Entity& e = *m_scene.find(m_selected);
+    ImGuiIO& io = ImGui::GetIO();
+    const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Right);
+    if (m_tileStroke && !down) m_tileStroke = false;
+    if (!free && !m_tileStroke) return false;
+    Vec3 eye, dir;
+    mouseRay(io.MousePos.x, io.MousePos.y, eye, dir);
+    const Transform w = worldTransform(m_scene, e);
+    if (std::fabs(dir.z) < 1e-5f) return false;
+    const f32 t = (w.position.z - eye.z) / dir.z; // the grid's plane
+    if (t < 0.0f) return false;
+    const Vec3 p = eye + dir * t;
+    const TileGrid g = tileGrid(e);
+    const int column = static_cast<int>(std::floor((p.x - w.position.x) / g.cellSize));
+    const int fromBottom = static_cast<int>(std::floor((p.y - w.position.y) / g.cellSize));
+    const int row = g.height - 1 - fromBottom;
+    if (column < 0 || column >= g.width || row < 0 || row >= g.height) return m_tileStroke;
+    m_tileHit = true;
+    m_tileCellX = column;
+    m_tileCellY = row;
+    const bool erase = io.KeyShift || ImGui::IsMouseDown(ImGuiMouseButton_Right);
+    if (!io.KeyAlt && (m_tileStroke || ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
+        m_tileStroke = true;
+        std::vector<int> tiles = parseTileCells(e.field("cells"), g.width, g.height);
+        int& cell = tiles[static_cast<size_t>(row) * static_cast<size_t>(g.width) + static_cast<size_t>(column)];
+        const int wanted = erase ? -1 : std::clamp(m_tile, 0, g.columns * g.rows - 1);
+        if (cell != wanted) {
+            cell = wanted;
+            e.setField("cells", formatTileCells(tiles, g.width, g.height));
+        }
+    }
+    // Outline of the hovered cell
+    f32 xs[4], ys[4];
+    const Vec3 corner[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    int count = 0;
+    for (const Vec3& c : corner) {
+        const Vec3 at{w.position.x + (static_cast<f32>(column) + c.x) * g.cellSize, w.position.y + (static_cast<f32>(fromBottom) + c.y) * g.cellSize, w.position.z};
+        if (project(at, xs[count], ys[count])) ++count;
+    }
+    if (count == 4) {
+        ImVec2 points[4];
+        for (int i = 0; i < 4; ++i) points[i] = {xs[i], ys[i]};
+        ImGui::GetForegroundDrawList()->AddPolyline(points, 4, erase ? IM_COL32(255, 110, 90, 230) : IM_COL32(255, 220, 90, 230), ImDrawFlags_Closed, 2.0f);
+    }
+    return true;
+}
+
+void App::drawTilemapInspector(Entity& e) {
+    form::section(tr("Tilemap"));
+    imagePicker(e, "##image");
+    const std::string image = e.field("image");
+    TileGrid g = tileGrid(e);
+    row(tr("Grid size (cells)"));
+    int size[2] = {g.width, g.height};
+    if (ImGui::DragInt2("##size", size, 0.1f, 1, 1024)) { // resize keeps the painted cells (rows from the top, columns from the left)
+        const std::vector<int> before = parseTileCells(e.field("cells"), g.width, g.height);
+        std::vector<int> after(static_cast<size_t>(size[0]) * static_cast<size_t>(size[1]), -1);
+        for (int r = 0; r < std::min(g.height, size[1]); ++r)
+            for (int c = 0; c < std::min(g.width, size[0]); ++c)
+                after[static_cast<size_t>(r) * static_cast<size_t>(size[0]) + static_cast<size_t>(c)] = before[static_cast<size_t>(r) * static_cast<size_t>(g.width) + static_cast<size_t>(c)];
+        e.setField("width", std::to_string(size[0]));
+        e.setField("height", std::to_string(size[1]));
+        e.setField("cells", formatTileCells(after, size[0], size[1]));
+        g = tileGrid(e);
+    }
+    row(tr("Cell size (m)"));
+    f32 cell = g.cellSize;
+    if (ImGui::DragFloat("##cellsize", &cell, 0.01f, 0.01f, 1000.0f, "%.3g")) e.setField("cellSize", floatText(std::max(cell, 0.01f)));
+    row(tr("Layer"));
+    int layer = fieldInt(e, "layer", 0);
+    if (ImGui::DragInt("##layer", &layer, 0.1f)) e.setField("layer", std::to_string(layer));
+    bool pixel = e.field("pixelArt") != "false";
+    row(tr("Pixel art"));
+    if (checkbox("##pixelart", &pixel)) e.setField("pixelArt", pixel ? "true" : "false");
+    if (image.empty()) {
+        ImGui::TextDisabled(tr("Pick a PNG here, or drag one from Assets into the view."));
+        return;
+    }
+    const SpriteEntry& whole = m_assets.sprite(image, 1, 1, 0, 0.5f, 0.5f, false, false);
+    if (!whole.error.empty()) {
+        ImGui::TextColored({1.0f, 0.5f, 0.4f, 1.0f}, "%s", whole.error.c_str());
+        return;
+    }
+    row(tr("Sheet columns, rows"));
+    int grid[2] = {g.columns, g.rows};
+    if (ImGui::DragInt2("##grid", grid, 0.05f, 1, 256)) {
+        e.setField("columns", std::to_string(std::max(1, grid[0])));
+        e.setField("rows", std::to_string(std::max(1, grid[1])));
+        g = tileGrid(e);
+    }
+    ImGui::TextDisabled(tr("%u x %u pixels, one tile %u x %u"), whole.cellWidth, whole.cellHeight, whole.cellWidth / g.columns, whole.cellHeight / g.rows);
+    checkbox(tr("Paint (B)"), &m_tileOn);
+    ImGui::SetItemTooltip(tr("Left button paints the picked tile, shift or the right button erases, alt moves the camera"));
+    ImGui::SameLine();
+    if (iconButton(kIconClear, tr("Erase all cells"))) {
+        e.setField("cells", formatTileCells(std::vector<int>(static_cast<size_t>(g.width) * static_cast<size_t>(g.height), -1), g.width, g.height));
+    }
+
+    // Palette: the sheet with its tile grid; click picks the tile to paint, right click marks it solid (red) or not
+    m_sheetWanted = image;
+    m_tile = std::clamp(m_tile, 0, g.columns * g.rows - 1);
+    std::set<int> solid = parseSolidTiles(e.field("solid"));
+    const f32 side = std::min(ImGui::GetContentRegionAvail().x, static_cast<f32>(kSheetSize) * 1.5f);
+    const f32 aspect = whole.cellHeight ? static_cast<f32>(whole.cellWidth) / static_cast<f32>(whole.cellHeight) : 1.0f;
+    const f32 w = aspect >= 1.0f ? side : side * aspect, h = aspect >= 1.0f ? side / aspect : side;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##palette", {std::max(side, 1.0f), std::max(h, 1.0f)});
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 lo{at.x + (side - w) * 0.5f, at.y}, hi{lo.x + w, lo.y + h};
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(lo, hi, ImGui::GetColorU32(ImGuiCol_FrameBg));
+    if (m_sheetTarget && m_sheetDrawn == image) {
+        const f32 du = aspect >= 1.0f ? 0.0f : (1.0f - aspect) * 0.5f, dv = aspect >= 1.0f ? (1.0f - 1.0f / aspect) * 0.5f : 0.0f;
+        if (const mkrhi::Texture texture = m_renderer->renderTargetTexture(m_sheetTarget))
+            dl->AddImage(ImTextureRef(static_cast<ImTextureID>(mkrhi::imguiTextureId(m_renderer->device(), texture))), lo, hi, {du, dv}, {1.0f - du, 1.0f - dv});
+    }
+    const f32 cw = w / static_cast<f32>(g.columns), ch = h / static_cast<f32>(g.rows);
+    const auto tileRect = [&](int index, ImVec2& a, ImVec2& b) {
+        a = {lo.x + cw * static_cast<f32>(index % g.columns), lo.y + ch * static_cast<f32>(index / g.columns)};
+        b = {a.x + cw, a.y + ch};
+    };
+    const ImU32 lineColor = IM_COL32(255, 255, 255, 70);
+    if (cw >= 3.0f)
+        for (int c = 1; c < g.columns; ++c) dl->AddLine({lo.x + cw * c, lo.y}, {lo.x + cw * c, hi.y}, lineColor);
+    if (ch >= 3.0f)
+        for (int r = 1; r < g.rows; ++r) dl->AddLine({lo.x, lo.y + ch * r}, {hi.x, lo.y + ch * r}, lineColor);
+    ImVec2 a, b;
+    for (const int index : solid) {
+        if (index >= g.columns * g.rows) break;
+        tileRect(index, a, b);
+        dl->AddRectFilled(a, b, IM_COL32(255, 70, 60, 70));
+        dl->AddRect(a, b, IM_COL32(255, 90, 70, 200));
+    }
+    tileRect(m_tile, a, b);
+    dl->AddRect(a, b, IM_COL32(255, 200, 60, 255), 0.0f, 0, 2.0f);
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    if (hovered && mouse.x >= lo.x && mouse.x < hi.x && mouse.y >= lo.y && mouse.y < hi.y) {
+        const int c = std::clamp(static_cast<int>((mouse.x - lo.x) / cw), 0, g.columns - 1), r = std::clamp(static_cast<int>((mouse.y - lo.y) / ch), 0, g.rows - 1);
+        const int index = r * g.columns + c;
+        tileRect(index, a, b);
+        dl->AddRect(a, b, IM_COL32(90, 200, 255, 230), 0.0f, 0, 1.5f);
+        ImGui::SetTooltip(tr("Tile %d (column %d, row %d), %s"), index, c + 1, r + 1, solid.count(index) ? tr("solid") : tr("not solid"));
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            m_tile = index;
+            m_tileOn = true;
+        }
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            if (!solid.erase(index)) solid.insert(index);
+            e.setField("solid", formatSolidTiles(solid));
+        }
+    }
+    ImGui::TextDisabled(tr("Click a tile to paint with it. Right click marks it solid (red): solid tiles collide in the game."));
 }
 
 void App::prepareSheet() {

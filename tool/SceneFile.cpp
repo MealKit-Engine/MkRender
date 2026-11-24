@@ -507,7 +507,8 @@ std::vector<KindInfo> builtinKindList() {
             k(kKindSpawn, "Spawn point", true, false, false),      k(kKindProbe, "Reflection probe", false, true, true),
             k(kKindPointLight, "Point light", true, false, true),  k(kKindReverb, "Reverb zone", false, true, true),
             k(kKindCamera, "Virtual camera", true, false, true),   k(kKindTerrain, "Terrain", false, false, false),
-            k(kKindScatter, "Scatter layer", false, false, true),  k(kKindSprite, "Sprite", false, false, true)};
+            k(kKindScatter, "Scatter layer", false, false, true),  k(kKindSprite, "Sprite", false, false, true),
+            k(kKindTilemap, "Tilemap", false, false, false)};
 }
 
 std::vector<KindInfo>& kindList() {
@@ -630,6 +631,84 @@ TextFields defaultFields(const std::string& kind) {
     return builtinDefaults(kind);
 }
 
+TileGrid tileGrid(const Entity& e) {
+    TileGrid g;
+    const auto number = [&](const char* key, f32 fallback) {
+        const std::string text = e.field(key);
+        char* end = nullptr;
+        const f32 v = std::strtof(text.c_str(), &end);
+        return !text.empty() && end != text.c_str() && std::isfinite(v) ? v : fallback;
+    };
+    g.width = std::clamp(static_cast<int>(number("width", 16.0f)), 1, 4096);
+    g.height = std::clamp(static_cast<int>(number("height", 9.0f)), 1, 4096);
+    while (static_cast<long long>(g.width) * g.height > (1 << 20)) g.height = std::max(1, g.height / 2); // scene::kMaxTilemapCells
+    g.columns = std::clamp(static_cast<int>(number("columns", 1.0f)), 1, 256);
+    g.rows = std::clamp(static_cast<int>(number("rows", 1.0f)), 1, 256);
+    g.cellSize = number("cellSize", 1.0f);
+    if (!(g.cellSize > 0.0f)) g.cellSize = 1.0f;
+    return g;
+}
+
+std::vector<int> parseTileCells(const std::string& text, int width, int height) {
+    std::vector<int> tiles(static_cast<size_t>(std::max(width, 0)) * static_cast<size_t>(std::max(height, 0)), -1);
+    size_t at = 0;
+    const char* p = text.c_str();
+    while (*p && at < tiles.size()) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
+        if (!*p) break;
+        long long value = -1;
+        if (*p >= '0' && *p <= '9') {
+            value = 0;
+            while (*p >= '0' && *p <= '9') value = std::min<long long>(value * 10 + (*p++ - '0'), 1 << 24);
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') ++p;
+        tiles[at++] = static_cast<int>(value);
+    }
+    return tiles;
+}
+
+std::string formatTileCells(const std::vector<int>& tiles, int width, int height) {
+    std::string out;
+    const size_t count = std::min(tiles.size(), static_cast<size_t>(std::max(width, 0)) * static_cast<size_t>(std::max(height, 0)));
+    for (size_t i = 0; i < count; ++i) {
+        if (i) out += ' ';
+        out += tiles[i] < 0 ? std::string(".") : std::to_string(tiles[i]);
+    }
+    return out;
+}
+
+std::set<int> parseSolidTiles(const std::string& text) {
+    std::set<int> out;
+    const char* p = text.c_str();
+    while (*p) {
+        while (*p && (*p < '0' || *p > '9')) ++p;
+        if (!*p) break;
+        long long a = 0;
+        while (*p >= '0' && *p <= '9') a = std::min<long long>(a * 10 + (*p++ - '0'), 1 << 24);
+        long long b = a;
+        if (*p == '-' && p[1] >= '0' && p[1] <= '9') {
+            ++p;
+            b = 0;
+            while (*p >= '0' && *p <= '9') b = std::min<long long>(b * 10 + (*p++ - '0'), 1 << 24);
+        }
+        for (long long t = a; t <= b && t - a < 65536; ++t) out.insert(static_cast<int>(t));
+    }
+    return out;
+}
+
+std::string formatSolidTiles(const std::set<int>& tiles) {
+    std::string out;
+    for (auto it = tiles.begin(); it != tiles.end();) {
+        auto last = it;
+        for (auto next = std::next(last); next != tiles.end() && *next == *last + 1; ++next) last = next;
+        if (!out.empty()) out += ' ';
+        out += std::to_string(*it);
+        if (last != it) out += "-" + std::to_string(*last);
+        it = std::next(last);
+    }
+    return out;
+}
+
 namespace {
 
 TextFields builtinDefaults(const std::string& kind) {
@@ -639,6 +718,9 @@ TextFields builtinDefaults(const std::string& kind) {
     if (kind == kKindSprite)
         return {{"image", ""},  {"columns", "1"}, {"rows", "1"},   {"cell", "0"},      {"pivotX", "0.5"},   {"pivotY", "0.5"},
                 {"pixelsPerUnit", "0"}, {"layer", "0"}, {"flipX", "false"}, {"flipY", "false"}, {"pixelArt", "false"}};
+    if (kind == kKindTilemap) // engine scene::TilemapFields
+        return {{"image", ""}, {"columns", "1"}, {"rows", "1"}, {"width", "16"}, {"height", "9"}, {"cellSize", "1"},
+                {"solid", ""}, {"cells", ""},    {"layer", "0"}, {"pixelArt", "true"}};
     if (kind == kKindScatter)
         return {{"model", ""},   {"file", ""},         {"density", "0.5"},  {"minScale", "0.8"},
                 {"maxScale", "1.2"}, {"randomYaw", "true"}, {"drawDistance", "120"}};

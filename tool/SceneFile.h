@@ -2,6 +2,7 @@
 
 #include "mkrender/Math.h"
 
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,6 +24,7 @@ inline constexpr const char* kKindScatter = "scatter";
 inline constexpr const char* kKindReverb = "reverb_zone";
 inline constexpr const char* kKindTerrain = "terrain";
 inline constexpr const char* kKindSprite = "sprite";
+inline constexpr const char* kKindTilemap = "tilemap";
 
 using TextFields = std::vector<std::pair<std::string, std::string>>; // (path, value text) in file order
 
@@ -130,6 +132,18 @@ const KindField* findKindField(const std::string& kind, const std::string& path)
 // Reads an "object-kinds 1" file and uses its kinds (false: kinds unchanged). resetKinds goes back to the built-in list
 bool loadKinds(const std::string& path, std::string& error);
 void resetKinds();
+// Tilemap objects (engine scene::TilemapFields, same text format): cells are tokens row by row from the top, "." empty
+struct TileGrid {
+    int width = 16, height = 9;
+    int columns = 1, rows = 1; // the sheet
+    f32 cellSize = 1.0f;
+};
+TileGrid tileGrid(const Entity& e); // clamped values read from the entity's fields
+std::vector<int> parseTileCells(const std::string& text, int width, int height); // width * height tile numbers, -1 empty
+std::string formatTileCells(const std::vector<int>& tiles, int width, int height);
+std::set<int> parseSolidTiles(const std::string& text);  // "3 5 8-11"
+std::string formatSolidTiles(const std::set<int>& tiles); // ranges written short
+
 // Default field lines of a new object of the kind (from the kinds file, else the built-in defaults; empty for kinds without fields)
 TextFields defaultFields(const std::string& kind);
 

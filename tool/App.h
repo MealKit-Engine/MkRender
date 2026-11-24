@@ -189,6 +189,15 @@ private:
 
     // Sprites (inspector): image picker, a sheet slicer over a picture of the whole image (click a cell), pivot presets
     void drawSpriteInspector(Entity& e);
+    bool imagePicker(Entity& e, const char* id); // image combo with thumbnails; true when the image changed
+    void drawTilemapInspector(Entity& e);
+    bool tilePaintActive() const;
+    bool tilePaintInput(bool free); // true: the mouse belongs to the tile brush this frame
+    bool m_tileOn = false;
+    int m_tile = 0; // picked sheet cell, painted by the left button; shift or right button erases
+    bool m_tileHit = false;
+    int m_tileCellX = 0, m_tileCellY = 0; // hovered grid cell (column, row from the top)
+    bool m_tileStroke = false;
     void drawSpritePivot(Entity& e);
     void prepareSheet(); // fill(): the picture of m_sheetWanted when it isn't drawn yet
     mkrhi::RenderTarget m_sheetTarget{};

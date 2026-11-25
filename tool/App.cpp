@@ -1001,6 +1001,16 @@ bool App::isArea(const Entity& e) const {
 }
 
 bool App::entityBounds(const Entity& e, Vec3& lo, Vec3& hi) {
+    if (e.is(kKindPath)) { // the box around its points, so framing the selection shows the whole path
+        const std::vector<Vec3> points = parsePathPoints(e.field("points"));
+        if (points.empty()) return false;
+        lo = hi = points[0];
+        for (const Vec3& p : points) {
+            lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+            hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+        }
+        return true;
+    }
     if (isMarker(e) || e.is(kKindScatter)) return false;
     lo = {-0.5f, -0.5f, -0.5f};
     hi = {0.5f, 0.5f, 0.5f};
@@ -2000,6 +2010,7 @@ void App::frame(f64 dt) {
     drawViewMode();
     drawGizmo();
     drawFieldHandles();
+    drawPathHandles();
     viewportInput();
     drawViewportMenu();
     drawEmptyView();
@@ -2873,6 +2884,7 @@ void App::drawInspector() {
             if (e.is(kKindScatter) || e.is(kKindTerrain)) drawBrushInspector(e);
             if (e.is(kKindSprite)) drawSpriteInspector(e);
             if (e.is(kKindTilemap)) drawTilemapInspector(e);
+            if (e.is(kKindPath)) drawPathInspector(e);
             if (!e.model.empty()) {
                 const ModelEntry& m = m_assets.model(e.model);
                 if (m.ok && m.skinned()) {
@@ -3108,6 +3120,32 @@ void App::drawOverlay() {
                          selected ? selectedColor : game ? IM_COL32(255, 150, 220, 150) : IM_COL32(120, 200, 255, 160), selected ? 2.0f : 1.0f);
             f32 x, y;
             if ((selected || ImGui::GetIO().KeyAlt) && project(w.position, x, y)) dl->AddText({x, y}, IM_COL32(230, 230, 230, 230), e.name.c_str());
+            continue;
+        }
+        if (e.is(kKindPath)) { // the polyline through the points (and back to the first when closed); handles come from drawPathHandles
+            if (!m_showMarkers && !selected) continue;
+            const std::vector<Vec3> local = parsePathPoints(e.field("points"));
+            const bool closed = e.field("closed") == "true" && local.size() >= 3;
+            const ImU32 color = selected ? selectedColor : IM_COL32(120, 230, 160, 200);
+            std::vector<Vec3> world;
+            for (const Vec3& p : local) world.push_back(w.position + rotate(w.rotation, {p.x * w.scale.x, p.y * w.scale.y, p.z * w.scale.z}));
+            for (size_t i = 0; i + 1 < world.size() + (closed ? 1u : 0u); ++i) {
+                f32 ax, ay, bx, by;
+                if (!project(world[i], ax, ay) || !project(world[(i + 1) % world.size()], bx, by)) continue;
+                dl->AddLine({ax, ay}, {bx, by}, color, selected ? 2.0f : 1.5f);
+                const f32 dx = bx - ax, dy = by - ay, len = std::hypot(dx, dy); // a small arrow in the middle shows the walking direction
+                if (len > 24.0f) {
+                    const ImVec2 mid{(ax + bx) * 0.5f, (ay + by) * 0.5f}, dir{dx / len, dy / len};
+                    dl->AddTriangleFilled({mid.x + dir.x * 5.0f, mid.y + dir.y * 5.0f}, {mid.x - dir.x * 4.0f - dir.y * 4.0f, mid.y - dir.y * 4.0f + dir.x * 4.0f},
+                                          {mid.x - dir.x * 4.0f + dir.y * 4.0f, mid.y - dir.y * 4.0f - dir.x * 4.0f}, color);
+                }
+            }
+            for (size_t i = 0; i < world.size(); ++i) {
+                f32 x, y;
+                if (!project(world[i], x, y)) continue;
+                dl->AddCircleFilled({x, y}, selected ? 4.0f : 3.0f, color);
+                if (selected) dl->AddText({x + 7.0f, y - 7.0f}, IM_COL32(230, 230, 230, 230), std::to_string(i + 1).c_str());
+            }
             continue;
         }
         if (isMarker(e) || e.is(kKindScatter) || (e.is(kKindSprite) && spriteSheet(e).image.empty())) {
@@ -3808,6 +3846,148 @@ void App::drawFieldHandles() {
         e->setField(f.path, floatText(std::round(std::max(next, 0.0f) * 1000.0f) / 1000.0f));
     }
     dl->PopClipRect();
+}
+
+// ---------------------------------------------------------------- Paths (kind "path": points in the object's own space)
+
+namespace {
+
+Vec3 pathToWorld(const Transform& w, Vec3 p) { return w.position + rotate(w.rotation, {p.x * w.scale.x, p.y * w.scale.y, p.z * w.scale.z}); }
+
+Vec3 pathToLocal(const Transform& w, Vec3 p) {
+    const Vec3 d = rotate(Quat{-w.rotation.x, -w.rotation.y, -w.rotation.z, w.rotation.w}, p - w.position);
+    const auto safe = [](f32 s) { return std::fabs(s) > 1e-4f ? s : 1.0f; };
+    return {d.x / safe(w.scale.x), d.y / safe(w.scale.y), d.z / safe(w.scale.z)};
+}
+
+} // namespace
+
+void App::drawPathHandles() {
+    Entity* e = m_scene.find(m_selected);
+    if (!e || !e->is(kKindPath) || m_uiW < 2.0f || m_hidden.count(e->id) || brushActive() || m_selection.size() > 1) {
+        m_pathDrag = -1;
+        return;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    dl->PushClipRect({m_uiX, m_uiY}, {m_uiX + m_uiW, m_uiY + m_uiH}, true);
+    const Transform w = worldTransform(m_scene, *e);
+    std::vector<Vec3> points = parsePathPoints(e->field("points"));
+    const ImVec2 mouse = io.MousePos;
+    const bool inside = mouse.x >= m_uiX && mouse.y >= m_uiY && mouse.x < m_uiX + m_uiW && mouse.y < m_uiY + m_uiH && !io.WantCaptureMouse;
+    int hot = -1;
+    for (size_t i = 0; i < points.size(); ++i) {
+        f32 x, y;
+        if (!project(pathToWorld(w, points[i]), x, y)) continue;
+        const bool dragging = m_pathDrag == static_cast<int>(i) && m_pathDragId == e->id;
+        const bool over = dragging || (inside && m_pathDrag < 0 && !m_gizmoUsing && std::hypot(mouse.x - x, mouse.y - y) < 9.0f);
+        if (over) hot = static_cast<int>(i);
+        const ImU32 color = over ? IM_COL32(255, 200, 60, 255) : IM_COL32(120, 230, 160, 230);
+        dl->AddCircleFilled({x, y}, over ? 7.0f : 5.5f, color);
+        dl->AddCircle({x, y}, over ? 7.0f : 5.5f, IM_COL32(20, 20, 24, 255), 0, 1.5f);
+    }
+    if (hot >= 0) m_handleUsing = true;
+    // The plane a point moves on: the ground plane through the point (2D view: the x/y plane through it)
+    const auto onPlane = [&](Vec3 through, Vec3& out) {
+        Vec3 eye, dir;
+        mouseRay(mouse.x, mouse.y, eye, dir);
+        if (m_view2d) {
+            if (std::fabs(dir.z) <= 1e-4f) return false;
+            out = eye + dir * ((through.z - eye.z) / dir.z);
+            return true;
+        }
+        if (std::fabs(dir.y) <= 1e-3f || (through.y - eye.y) / dir.y <= 0.0f) return false;
+        out = eye + dir * ((through.y - eye.y) / dir.y);
+        return true;
+    };
+    const auto snap = [&](f32 v) { return io.KeyCtrl != m_alwaysSnap && m_snapMove > 0.0f ? std::round(v / m_snapMove) * m_snapMove : v; };
+    bool changed = false;
+    if (m_pathDrag < 0 && hot >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyShift) {
+        m_pathDrag = hot;
+        m_pathDragId = e->id;
+    } else if (m_pathDrag < 0 && hot >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete) && points.size() > 2) {
+        points.erase(points.begin() + hot);
+        changed = true;
+    } else if (m_pathDrag < 0 && hot < 0 && inside && io.KeyShift && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) { // append at the ground under the cursor
+        const Vec3 through = points.empty() ? w.position : pathToWorld(w, points.back());
+        Vec3 hit;
+        if (onPlane(through, hit)) {
+            hit = {snap(hit.x), m_view2d ? hit.y : through.y, m_view2d ? hit.z : snap(hit.z)};
+            if (m_view2d) hit.y = snap(hit.y);
+            points.push_back(pathToLocal(w, hit));
+            changed = true;
+        }
+    }
+    if (m_pathDrag >= 0 && m_pathDragId == e->id) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || m_pathDrag >= static_cast<int>(points.size())) {
+            m_pathDrag = -1;
+        } else {
+            const Vec3 through = pathToWorld(w, points[static_cast<size_t>(m_pathDrag)]);
+            Vec3 hit;
+            if (onPlane(through, hit)) {
+                Vec3 next = m_view2d ? Vec3{snap(hit.x), snap(hit.y), through.z} : Vec3{snap(hit.x), through.y, snap(hit.z)};
+                points[static_cast<size_t>(m_pathDrag)] = pathToLocal(w, next);
+                changed = true;
+            }
+            m_handleUsing = true;
+        }
+    }
+    if (changed) {
+        std::vector<Vec3> rounded = points;
+        for (Vec3& p : rounded) p = {std::round(p.x * 1000.0f) / 1000.0f, std::round(p.y * 1000.0f) / 1000.0f, std::round(p.z * 1000.0f) / 1000.0f};
+        e->setField("points", formatPathPoints(rounded));
+    }
+    dl->PopClipRect();
+}
+
+void App::drawPathInspector(Entity& e) {
+    form::section(tr("Path"));
+    bool closed = e.field("closed") == "true";
+    row(tr("Closed loop"));
+    if (checkbox("##closed", &closed)) e.setField("closed", closed ? "true" : "false");
+    std::vector<Vec3> points = parsePathPoints(e.field("points"));
+    bool changed = false;
+    f32 length = 0.0f; // in the object's own scale, like the engine's table (whole millimeters, rounded per segment)
+    for (size_t i = 0; i + 1 < points.size() + ((closed && points.size() >= 3) ? 1u : 0u); ++i) {
+        const Vec3 a = points[i], b = points[(i + 1) % points.size()];
+        const Vec3 d{(b.x - a.x) * e.scale.x, (b.y - a.y) * e.scale.y, (b.z - a.z) * e.scale.z};
+        length += std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    }
+    row(tr("Points"));
+    ImGui::TextDisabled(tr("%.2f m long"), length);
+    int remove = -1, insert = -1;
+    for (size_t i = 0; i < points.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        f32 v[3] = {points[i].x, points[i].y, points[i].z};
+        ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight() * 2.0f - ImGui::GetStyle().ItemSpacing.x * 2.0f, 60.0f));
+        if (ImGui::DragFloat3("##p", v, 0.05f, 0.0f, 0.0f, "%.3g")) {
+            points[i] = {v[0], v[1], v[2]};
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (iconButton(kIconAdd, tr("Insert point after"))) insert = static_cast<int>(i);
+        ImGui::SameLine();
+        if (points.size() > 2 && iconButton(kIconRemove, tr("Remove point"))) remove = static_cast<int>(i);
+        ImGui::PopID();
+    }
+    if (insert >= 0) { // halfway to the next point (or a meter beyond the last one)
+        const size_t i = static_cast<size_t>(insert);
+        const Vec3 a = points[i];
+        const Vec3 b = i + 1 < points.size() ? points[i + 1] : Vec3{a.x + 1.0f, a.y, a.z};
+        points.insert(points.begin() + insert + 1, {(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f, (a.z + b.z) * 0.5f});
+        changed = true;
+    }
+    if (remove >= 0) {
+        points.erase(points.begin() + remove);
+        changed = true;
+    }
+    if (points.empty() && iconButton(kIconAdd, tr("Add point"))) {
+        points.push_back({0.0f, 0.0f, 0.0f});
+        points.push_back({4.0f, 0.0f, 0.0f});
+        changed = true;
+    }
+    if (changed) e.setField("points", formatPathPoints(points));
+    ImGui::TextDisabled("%s", tr("Drag a point in the view to move it. Shift+click on the ground adds one at the end, Delete removes the point under the cursor."));
 }
 
 // ---------------------------------------------------------------- Hierarchy icons and problems

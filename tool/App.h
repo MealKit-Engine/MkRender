@@ -214,6 +214,10 @@ private:
 
     // Field handles: each "gizmo=radius" field of the selected object (kinds file hint) as rings around it with a handle to drag
     void drawFieldHandles();
+    void drawPathHandles();               // the selected path object's points: hover, drag, shift+click on the ground adds one, delete removes the hovered one
+    void drawPathInspector(Entity& e);
+    int m_pathDrag = -1;                  // index of the point being dragged
+    u32 m_pathDragId = 0;
     bool m_handleUsing = false; // the mouse belongs to a handle this frame (no click select)
     std::string m_radiusDrag;   // field path being dragged
     u32 m_radiusDragId = 0;

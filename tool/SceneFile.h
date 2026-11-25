@@ -25,6 +25,7 @@ inline constexpr const char* kKindReverb = "reverb_zone";
 inline constexpr const char* kKindTerrain = "terrain";
 inline constexpr const char* kKindSprite = "sprite";
 inline constexpr const char* kKindTilemap = "tilemap";
+inline constexpr const char* kKindPath = "path"; // ordered points an AI patrols (engine scene::PathFields: closed, points "x y z; x y z" in the object's own space)
 
 using TextFields = std::vector<std::pair<std::string, std::string>>; // (path, value text) in file order
 
@@ -146,5 +147,8 @@ std::string formatSolidTiles(const std::set<int>& tiles); // ranges written shor
 
 // Default field lines of a new object of the kind (from the kinds file, else the built-in defaults; empty for kinds without fields)
 TextFields defaultFields(const std::string& kind);
+// A path object's points text ("x y z; x y z"); a piece without three numbers is skipped
+std::vector<Vec3> parsePathPoints(const std::string& text);
+std::string formatPathPoints(const std::vector<Vec3>& points);
 
 } // namespace mkrender::tool

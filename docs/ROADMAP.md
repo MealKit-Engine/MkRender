@@ -3,7 +3,7 @@
 Only work that is left. When an item is done, remove it here and describe it in the engine's `docs/CHANGELOG.md` under the item's name (MkRender versions are in `git log`).
 Sources: engine `docs/ROADMAP.md` "Scene editing in MkRender, leftovers", "MkRender leftovers" and "Design refresh for the rest of the suite"; engine `docs/TOOL_DESIGN.md` sections 6 and 7; the scene tree, inspector and viewport items of the engine's "Editor usability" list (moved here 2026-11-22, sections 4 and 5; numbers are those of the 2026-11-04 list).
 
-Only work an agent can do without a person is listed here. MkRender's hand checks (the screenshot beside the editor at the same DPI for TOOL_DESIGN section 6 item 7, dragging a `gizmo=radius` handle) and the decision whether to publish MkRender as a product of its own are in the engine's `docs/ROADMAP_HUMAN.md` (moved 2026-11-24).
+Only work an agent can do without a person is listed here. MkRender's hand checks (the screenshot beside the editor at the same DPI for TOOL_DESIGN section 6 item 7, dragging a `gizmo=radius` handle, dragging, Shift+click adding and Delete removing the points of a `path` object) and the decision whether to publish MkRender as a product of its own are in the engine's `docs/ROADMAP_HUMAN.md` (moved 2026-11-24).
 
 **Suggested order**: 4 one piece at a time when scenes grow (FuseTag maps).
 

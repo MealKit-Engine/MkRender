@@ -22,6 +22,14 @@ struct Pair {
 // Korean follows engine docs/TOOL_DESIGN.md section 4: short, plain words, sentences in 해요체, buttons and menu items a verb noun
 constexpr Pair kKorean[] = {
     {"Autosaved to %s", "%s에 자동 저장했어요"},
+    {"Path", "경로"},
+    {"Closed loop", "닫힌 고리"},
+    {"Points", "점"},
+    {"Add point", "점 추가"},
+    {"Remove point", "점 지우기"},
+    {"Insert point after", "뒤에 점 넣기"},
+    {"Drag a point in the view to move it. Shift+click on the ground adds one at the end, Delete removes the point under the cursor.", "뷰에서 점을 끌면 옮겨요. 바닥을 Shift+클릭하면 끝에 점이 늘고, Delete는 커서 아래 점을 지워요."},
+    {"%.2f m long", "길이 %.2f m"},
     {"Terrain brush", "지형 브러시"},
     {"Scatter brush", "흩뿌리기 브러시"},
     {"Open a project to paint (files go to its assets/terrain).", "칠하려면 프로젝트를 여세요 (파일은 프로젝트의 assets/terrain에 저장돼요)."},

@@ -508,7 +508,7 @@ std::vector<KindInfo> builtinKindList() {
             k(kKindPointLight, "Point light", true, false, true),  k(kKindReverb, "Reverb zone", false, true, true),
             k(kKindCamera, "Virtual camera", true, false, true),   k(kKindTerrain, "Terrain", false, false, false),
             k(kKindScatter, "Scatter layer", false, false, true),  k(kKindSprite, "Sprite", false, false, true),
-            k(kKindTilemap, "Tilemap", false, false, false)};
+            k(kKindTilemap, "Tilemap", false, false, false),       k(kKindPath, "Path", true, false, false)};
 }
 
 std::vector<KindInfo>& kindList() {
@@ -709,6 +709,39 @@ std::string formatSolidTiles(const std::set<int>& tiles) {
     return out;
 }
 
+std::vector<Vec3> parsePathPoints(const std::string& text) {
+    std::vector<Vec3> points;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find(';', start);
+        if (end == std::string::npos) end = text.size();
+        const char* p = text.c_str() + start;
+        const char* stop = text.c_str() + end;
+        f32 v[3];
+        int n = 0;
+        while (n < 3) {
+            while (p < stop && std::isspace(static_cast<unsigned char>(*p))) ++p;
+            char* next = nullptr;
+            const f32 value = std::strtof(p, &next);
+            if (next == p || next > stop) break;
+            v[n++] = value;
+            p = next;
+        }
+        if (n == 3) points.push_back({v[0], v[1], v[2]});
+        start = end + 1;
+    }
+    return points;
+}
+
+std::string formatPathPoints(const std::vector<Vec3>& points) {
+    std::string out;
+    for (const Vec3& p : points) {
+        if (!out.empty()) out += "; ";
+        out += floatText(p.x) + " " + floatText(p.y) + " " + floatText(p.z);
+    }
+    return out;
+}
+
 namespace {
 
 TextFields builtinDefaults(const std::string& kind) {
@@ -718,6 +751,7 @@ TextFields builtinDefaults(const std::string& kind) {
     if (kind == kKindSprite)
         return {{"image", ""},  {"columns", "1"}, {"rows", "1"},   {"cell", "0"},      {"pivotX", "0.5"},   {"pivotY", "0.5"},
                 {"pixelsPerUnit", "0"}, {"layer", "0"}, {"flipX", "false"}, {"flipY", "false"}, {"pixelArt", "false"}};
+    if (kind == kKindPath) return {{"closed", "false"}, {"points", "0 0 0; 4 0 0; 4 0 4"}};
     if (kind == kKindTilemap) // engine scene::TilemapFields
         return {{"image", ""}, {"columns", "1"}, {"rows", "1"}, {"width", "16"}, {"height", "9"}, {"cellSize", "1"},
                 {"solid", ""}, {"cells", ""},    {"layer", "0"}, {"pixelArt", "true"}};

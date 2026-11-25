@@ -89,6 +89,10 @@ std::string missingFeatures(VkPhysicalDevice physical, VkSurfaceKHR surface) {
              f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingStorageBufferUpdateAfterBind &&
              f12.shaderSampledImageArrayNonUniformIndexing,
          "descriptor indexing");
+    need(f12.descriptorBindingStorageImageUpdateAfterBind && f12.shaderStorageImageArrayNonUniformIndexing &&
+             f12.shaderStorageBufferArrayNonUniformIndexing && features.features.shaderStorageImageArrayDynamicIndexing &&
+             features.features.shaderStorageImageReadWithoutFormat && features.features.shaderStorageImageWriteWithoutFormat,
+         "storage descriptor indexing (compute)");
     need(f13.dynamicRendering, "dynamic rendering");
     need(f13.synchronization2, "synchronization2");
     need(f13.shaderDemoteToHelperInvocation, "demote to helper invocation");
@@ -246,6 +250,8 @@ VkFormat toVk(Format f) {
     case Format::Bc7Srgb: return VK_FORMAT_BC7_SRGB_BLOCK;
     case Format::Bc5Unorm: return VK_FORMAT_BC5_UNORM_BLOCK;
     case Format::Rgb9e5: return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+    case Format::Rgba16Float: return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case Format::R32Float: return VK_FORMAT_R32_SFLOAT;
     default: return VK_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -470,6 +476,9 @@ bool Device::init(const DeviceDesc& desc) {
     f12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     f12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     f12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE; // material textures (NonUniformResourceIndex)
+    f12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE; // compute (G1): g_rwTextures[] / g_rwBuffers[]
+    f12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+    f12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f12};
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(m->physical, &supported);
@@ -478,6 +487,9 @@ bool Device::init(const DeviceDesc& desc) {
     m->samplerAnisotropy = supported.samplerAnisotropy == VK_TRUE; // model texture sampler (no anisotropy if absent)
     features.features.samplerAnisotropy = supported.samplerAnisotropy;
     features.features.textureCompressionBC = supported.textureCompressionBC; // BC7/BC5 (all desktop GPUs have it)
+    features.features.shaderStorageImageArrayDynamicIndexing = VK_TRUE; // checked by missingFeatures
+    features.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+    features.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
     m->memoryBudget = hasExtension(m->physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); // optional (GPU memory numbers)
     if (m->memoryBudget) extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -537,30 +549,34 @@ bool Device::init(const DeviceDesc& desc) {
     sci.anisotropyEnable = m->samplerAnisotropy ? VK_TRUE : VK_FALSE;
     sci.maxAnisotropy = 8.0f;
     VK(vkCreateSampler(m->device, &sci, nullptr, &m->linearWrap));
-    VkDescriptorSetLayoutBinding bindings[5] = {};
-    bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr};
-    bindings[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr};
-    bindings[2] = {2, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearClamp};
-    bindings[3] = {3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL_GRAPHICS, &m->linearWrap};
-    bindings[4] = {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, VK_SHADER_STAGE_ALL_GRAPHICS, nullptr}; // cubes (same indices as textures)
+    constexpr VkShaderStageFlags kStages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutBinding bindings[7] = {};
+    bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers, kStages, nullptr};
+    bindings[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, kStages, nullptr};
+    bindings[2] = {2, VK_DESCRIPTOR_TYPE_SAMPLER, 1, kStages, &m->linearClamp};
+    bindings[3] = {3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, kStages, &m->linearWrap};
+    bindings[4] = {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures, kStages, nullptr}; // cubes (same indices as textures)
+    bindings[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxStorageBuffers, kStages, nullptr};  // RWByteAddressBuffer (compute)
+    bindings[6] = {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxStorageTextures, kStages, nullptr};  // RWTexture2D (compute)
     const VkDescriptorBindingFlags bindless =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-    const VkDescriptorBindingFlags bindingFlags[5] = {bindless, bindless, 0, 0, bindless};
+    const VkDescriptorBindingFlags bindingFlags[7] = {bindless, bindless, 0, 0, bindless, bindless, bindless};
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
-    flagsInfo.bindingCount = 5;
+    flagsInfo.bindingCount = 7;
     flagsInfo.pBindingFlags = bindingFlags;
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &flagsInfo};
     li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    li.bindingCount = 5;
+    li.bindingCount = 7;
     li.pBindings = bindings;
     VK(vkCreateDescriptorSetLayout(m->device, &li, nullptr, &m->setLayout));
-    const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers},
+    const VkDescriptorPoolSize sizes[4] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBuffers + kMaxStorageBuffers},
                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures * 2},
-                                           {VK_DESCRIPTOR_TYPE_SAMPLER, 2}};
+                                           {VK_DESCRIPTOR_TYPE_SAMPLER, 2},
+                                           {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxStorageTextures}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pi.maxSets = 1;
-    pi.poolSizeCount = 3;
+    pi.poolSizeCount = 4;
     pi.pPoolSizes = sizes;
     VK(vkCreateDescriptorPool(m->device, &pi, nullptr, &m->descriptorPool));
     VkDescriptorSetAllocateInfo sai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -569,7 +585,10 @@ bool Device::init(const DeviceDesc& desc) {
     sai.pSetLayouts = &m->setLayout;
     VK(vkAllocateDescriptorSets(m->device, &sai, &m->descriptorSet));
     for (u32 i = kMaxTextures; i > 0; --i) m->freeTextureSlots.push_back(i - 1);
-    const VkPushConstantRange push{VK_SHADER_STAGE_ALL_GRAPHICS, 0, kPushConstantBytes};
+    for (u32 i = kMaxBuffers; i > 1; --i) m->freeBufferSlots.push_back(i - 1); // slot 0 = the upload ring
+    for (u32 i = kMaxStorageBuffers; i > 0; --i) m->freeRwBufferSlots.push_back(i - 1);
+    for (u32 i = kMaxStorageTextures; i > 0; --i) m->freeRwTextureSlots.push_back(i - 1);
+    const VkPushConstantRange push{kStages, 0, kPushConstantBytes};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &m->setLayout;
@@ -780,8 +799,144 @@ void Device::destroyBuffer(Buffer buffer) {
     if (!b.buffer) return;
     vkDeviceWaitIdle(m->device);
     vmaDestroyBuffer(m->allocator, b.buffer, b.allocation);
+    if (b.slot != kNoSlot) m->freeBufferSlots.push_back(b.slot);
+    if (b.rwSlot != kNoSlot) m->freeRwBufferSlots.push_back(b.rwSlot);
     b = {};
 }
+
+// ---------------------------------------------------------------- compute resources (G1)
+
+Buffer Device::createStorageBuffer(u64 bytes) {
+    if (m->freeBufferSlots.empty() || m->freeRwBufferSlots.empty()) MKRHI_FATAL("Storage buffer slots exhausted (%u)", kMaxStorageBuffers);
+    bytes = (std::max<u64>(bytes, 4) + 3) & ~u64{3};
+    Impl::BufferEntry entry;
+    entry.bytes = bytes;
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = bytes;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    VK(vmaCreateBuffer(m->allocator, &bci, &aci, &entry.buffer, &entry.allocation, nullptr));
+    VkCommandBuffer cmd = m->beginImmediate();
+    vkCmdFillBuffer(cmd, entry.buffer, 0, VK_WHOLE_SIZE, 0);
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd, &dep);
+    m->endImmediate(cmd);
+
+    entry.slot = m->freeBufferSlots.back();
+    m->freeBufferSlots.pop_back();
+    entry.rwSlot = m->freeRwBufferSlots.back();
+    m->freeRwBufferSlots.pop_back();
+    const VkDescriptorBufferInfo info{entry.buffer, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet writes[2] = {};
+    for (u32 i = 0; i < 2; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = m->descriptorSet;
+        writes[i].dstBinding = i == 0 ? 0 : 5;
+        writes[i].dstArrayElement = i == 0 ? entry.slot : entry.rwSlot;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &info;
+    }
+    vkUpdateDescriptorSets(m->device, 2, writes, 0, nullptr);
+    m->buffers.push_back(entry);
+    return {static_cast<u32>(m->buffers.size())};
+}
+
+u32 Device::bufferIndex(Buffer buffer) const { return m->buffers[buffer.id - 1].slot; }
+u32 Device::storageBufferIndex(Buffer buffer) const { return m->buffers[buffer.id - 1].rwSlot; }
+
+bool Device::readBuffer(Buffer buffer, u64 offset, void* dst, u64 bytes) {
+    if (!m || m->inFrame || !buffer || buffer.id > m->buffers.size()) return false;
+    const Impl::BufferEntry& b = m->buffers[buffer.id - 1];
+    if (!b.buffer || offset + bytes > b.bytes) return false;
+    vkDeviceWaitIdle(m->device);
+    VkBuffer staging = VK_NULL_HANDLE;
+    VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+    VmaAllocationInfo info{};
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = bytes;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VK(vmaCreateBuffer(m->allocator, &bci, &aci, &staging, &stagingAllocation, &info));
+    VkCommandBuffer cmd = m->beginImmediate();
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2}; // writes of the frames already finished
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd, &dep);
+    const VkBufferCopy region{offset, 0, bytes};
+    vkCmdCopyBuffer(cmd, b.buffer, staging, 1, &region);
+    m->endImmediate(cmd);
+    VK(vmaInvalidateAllocation(m->allocator, stagingAllocation, 0, VK_WHOLE_SIZE));
+    std::memcpy(dst, info.pMappedData, bytes);
+    vmaDestroyBuffer(m->allocator, staging, stagingAllocation);
+    return true;
+}
+
+Texture Device::createStorageTexture(u32 width, u32 height, Format format) {
+    if (m->freeRwTextureSlots.empty()) MKRHI_FATAL("Storage texture slots exhausted (%u)", kMaxStorageTextures);
+    Impl::TextureEntry entry;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = toVk(format);
+    ici.extent = {width, height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    VK(vmaCreateImage(m->allocator, &ici, &aci, &entry.image, &entry.allocation, nullptr));
+    entry.view = createView(m->device, entry.image, ici.format, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    VkCommandBuffer cmd = m->beginImmediate(); // zero contents, shader-readable (like createTexture)
+    imageBarrier(cmd, entry.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkClearColorValue zero{};
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cmd, entry.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+    imageBarrier(cmd, entry.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m->endImmediate(cmd);
+
+    entry.slot = m->allocTextureSlot();
+    entry.rwSlot = m->freeRwTextureSlots.back();
+    m->freeRwTextureSlots.pop_back();
+    const VkDescriptorImageInfo sampled{VK_NULL_HANDLE, entry.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo storage{VK_NULL_HANDLE, entry.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet writes[2] = {};
+    writes[0].sType = writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = writes[1].dstSet = m->descriptorSet;
+    writes[0].dstBinding = 1;
+    writes[0].dstArrayElement = entry.slot;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].pImageInfo = &sampled;
+    writes[1].dstBinding = 6;
+    writes[1].dstArrayElement = entry.rwSlot;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[1].pImageInfo = &storage;
+    vkUpdateDescriptorSets(m->device, 2, writes, 0, nullptr);
+    m->textures.push_back(entry);
+    return {static_cast<u32>(m->textures.size())};
+}
+
+u32 Device::storageTextureIndex(Texture texture) const { return m->textures[texture.id - 1].rwSlot; }
 
 Texture Device::createTexture(u32 width, u32 height, Format format) {
     Impl::TextureEntry entry;
@@ -1113,11 +1268,40 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
     vkDestroyShaderModule(m->device, vs, nullptr);
     vkDestroyShaderModule(m->device, ps, nullptr);
     m->pipelines.push_back(pipeline);
+    m->pipelineIsCompute.push_back(0);
     return {static_cast<u32>(m->pipelines.size())};
 }
 
+Pipeline Device::createComputePipeline(const ComputePipelineDesc& desc) {
+    VkShaderModuleCreateInfo mci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    mci.codeSize = desc.cs.size;
+    mci.pCode = static_cast<const u32*>(desc.cs.data);
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VK(vkCreateShaderModule(m->device, &mci, nullptr, &mod));
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "CSMain"};
+    ci.layout = m->pipelineLayout;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VK(vkCreateComputePipelines(m->device, m->pipelineCache, 1, &ci, nullptr, &pipeline));
+    vkDestroyShaderModule(m->device, mod, nullptr);
+    m->pipelines.push_back(pipeline);
+    m->pipelineIsCompute.push_back(1);
+    return {static_cast<u32>(m->pipelines.size())};
+}
+
+bool Device::recreatePipeline(Pipeline pipeline, const ComputePipelineDesc& desc) {
+    if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size() || !m->pipelineIsCompute[pipeline.id - 1]) return false;
+    vkDeviceWaitIdle(m->device);
+    createComputePipeline(desc);
+    vkDestroyPipeline(m->device, m->pipelines[pipeline.id - 1], nullptr);
+    m->pipelines[pipeline.id - 1] = m->pipelines.back();
+    m->pipelines.pop_back();
+    m->pipelineIsCompute.pop_back();
+    return true;
+}
+
 bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
-    if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size()) return false;
+    if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size() || m->pipelineIsCompute[pipeline.id - 1]) return false;
     vkDeviceWaitIdle(m->device);
     const VkPipelineCache cache = m->pipelineCache; // hot reload: not cached (the file would only grow)
     m->pipelineCache = VK_NULL_HANDLE;
@@ -1126,6 +1310,7 @@ bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
     vkDestroyPipeline(m->device, m->pipelines[pipeline.id - 1], nullptr);
     m->pipelines[pipeline.id - 1] = m->pipelines.back();
     m->pipelines.pop_back();
+    m->pipelineIsCompute.pop_back();
     return true;
 }
 
@@ -1458,14 +1643,18 @@ void CommandList::setViewport(f32 x, f32 y, f32 width, f32 height) {
 void CommandList::setPipeline(Pipeline pipeline) {
     Device::Impl* m = m_device->impl();
     VkCommandBuffer cmd = m->current();
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m->pipelines[pipeline.id - 1]);
+    const bool compute = m->pipelineIsCompute[pipeline.id - 1] != 0;
+    const VkPipelineBindPoint point = compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
+    m->computeBound = compute;
+    vkCmdBindPipeline(cmd, point, m->pipelines[pipeline.id - 1]);
     // The debug UI may have bound its own set, so rebind every time
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m->pipelineLayout, 0, 1, &m->descriptorSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, point, m->pipelineLayout, 0, 1, &m->descriptorSet, 0, nullptr);
 }
 
 void CommandList::pushConstants(const void* data, u32 bytes) {
     Device::Impl* m = m_device->impl();
-    vkCmdPushConstants(m->current(), m->pipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, bytes, data);
+    // One range covers every stage, so graphics and compute pushes use the same call
+    vkCmdPushConstants(m->current(), m->pipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT, 0, bytes, data);
 }
 
 void CommandList::setVertexBuffer(Buffer buffer, u32) {
@@ -1493,9 +1682,47 @@ void CommandList::textureBarrier(Texture texture, TextureState before, TextureSt
     Device::Impl* m = m_device->impl();
     m->endRendering(); // barriers/copies happen outside the render target
     auto layout = [](TextureState s) {
-        return s == TextureState::CopyDst ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        return s == TextureState::CopyDst          ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+               : s == TextureState::UnorderedAccess ? VK_IMAGE_LAYOUT_GENERAL
+                                                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     };
     imageBarrier(m->current(), m->textures[texture.id - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, layout(before), layout(after));
+}
+
+void CommandList::dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) {
+    Device::Impl* m = m_device->impl();
+    m->endRendering(); // compute runs outside a render pass
+    vkCmdDispatch(m->current(), groupsX, groupsY, groupsZ);
+}
+
+void CommandList::bufferBarrier(Buffer buffer, BufferState, BufferState) {
+    Device::Impl* m = m_device->impl();
+    m->endRendering();
+    VkBufferMemoryBarrier2 b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+    b.srcStageMask = b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT; // Vulkan needs no state change for a buffer, only the dependency
+    b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.buffer = m->buffers[buffer.id - 1].buffer;
+    b.offset = 0;
+    b.size = VK_WHOLE_SIZE;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(m->current(), &dep);
+}
+
+void CommandList::uavBarrier() {
+    Device::Impl* m = m_device->impl();
+    m->endRendering();
+    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(m->current(), &dep);
 }
 
 void CommandList::copyToTexture(Texture texture, u32 x, u32 y, u32 width, u32 height, u64 uploadOffset, u32 rowPitch) {

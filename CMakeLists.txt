@@ -16,7 +16,7 @@
 #   MKRENDER_USER_CONFIG       header with the host's own math/mesh/image types (include/mkrender/Config.h), and
 #   MKRENDER_USER_CONFIG_INCLUDE_DIRS  the folders it needs
 cmake_minimum_required(VERSION 3.25)
-project(mkrender VERSION 0.11.0 LANGUAGES C CXX)
+project(mkrender VERSION 0.12.0 LANGUAGES C CXX)
 
 set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
 set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)
@@ -189,6 +189,8 @@ if(MKRENDER_DXC)
         # The Vulkan backend builds pipelines with entry point names VSMain/PSMain: other entry points are renamed in SPIR-V
         if(profile MATCHES "^vs_")
             set(spirv_entry -fspv-entrypoint-name=VSMain)
+        elseif(profile MATCHES "^cs_")
+            set(spirv_entry -fspv-entrypoint-name=CSMain)
         else()
             set(spirv_entry -fspv-entrypoint-name=PSMain)
         endif()
@@ -200,7 +202,7 @@ if(MKRENDER_DXC)
             set(spirv ${MKRENDER_SHADER_OUT}/other/${name}.h)
         endif()
         set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${source})
-        set(deps ${src} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/Bindless.hlsli)
+        set(deps ${src} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/Bindless.hlsli ${CMAKE_CURRENT_SOURCE_DIR}/shaders/Compute.hlsli)
         add_custom_command(OUTPUT ${dxil}
             COMMAND ${MKRENDER_DXC} -nologo -T ${profile} -E ${entry} -Vn ${name} -Fh ${dxil} ${MKRENDER_DXIL_FLAGS} ${defines} ${src}
             DEPENDS ${deps} COMMENT "DXC ${source} (${entry}, DXIL)" VERBATIM)
@@ -237,6 +239,10 @@ if(MKRENDER_DXC)
     mkrender_shader(Post.hlsl PSUber ps_6_6 g_UberPS)
     mkrender_shader(Ui.hlsl VSMain vs_6_6 g_UiVS)
     mkrender_shader(Ui.hlsl PSMain ps_6_6 g_UiPS)
+    # Compute test shaders (tests/ComputeTest.cpp); the renderer has no compute passes yet
+    mkrender_shader(ComputeTest.hlsl CSFill cs_6_6 g_ComputeFillCS)
+    mkrender_shader(ComputeTest.hlsl CSAdd cs_6_6 g_ComputeAddCS)
+    mkrender_shader(ComputeTest.hlsl CSCopy cs_6_6 g_ComputeCopyCS)
 
     # MKRENDER_USER_CONFIG / MKRENDER_USER_CONFIG_INCLUDE_DIRS: the host's types (include/mkrender/Config.h)
     add_library(mkrender ${mkrender_lib_type}
@@ -298,6 +304,20 @@ if(MKRENDER_BUILD_TESTS)
             target_compile_options(mkrender_golden PRIVATE /W4 /permissive- /utf-8)
         endif()
         add_test(NAME mkrender_golden COMMAND mkrender_golden WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        # RHI compute (tests/ComputeTest.cpp): compute pipelines, storage buffers/textures, barriers on a hidden window. Skips without a GPU
+        add_executable(mkrender_compute tests/ComputeTest.cpp)
+        target_link_libraries(mkrender_compute PRIVATE mkrhi)
+        add_dependencies(mkrender_compute mkrender) # the compute test shader headers are built with it
+        target_include_directories(mkrender_compute PRIVATE ${MKRENDER_SHADER_OUT})
+        if(NOT WIN32)
+            target_link_libraries(mkrender_compute PRIVATE X11::X11)
+        endif()
+        if(MSVC)
+            target_compile_options(mkrender_compute PRIVATE /W4 /permissive- /utf-8)
+        else()
+            target_compile_options(mkrender_compute PRIVATE -Wall -Wextra)
+        endif()
+        add_test(NAME mkrender_compute COMMAND mkrender_compute WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     endif()
 endif()
 

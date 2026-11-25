@@ -18,8 +18,14 @@ using Microsoft::WRL::ComPtr;
 
 constexpr u32 kBackBufferCount = 3;
 constexpr u64 kUploadBytesPerFrame = 8ull << 20; // about 170k instances
-constexpr u32 kMaxBuffers = 16;     // g_buffers[] slots (front of the descriptor heap)
+constexpr u32 kMaxBuffers = 256;    // g_buffers[] slots (front of the descriptor heap; slot 0 is the upload ring)
 constexpr u32 kMaxTextures = 4096;  // g_textures[] slots (after that; debug UI textures also come from here)
+constexpr u32 kMaxStorageBuffers = 256;  // g_rwBuffers[] UAV slots (after the textures)
+constexpr u32 kMaxStorageTextures = 256; // g_rwTextures[] UAV slots (last)
+constexpr u32 kRwBufferBase = kMaxBuffers + kMaxTextures;
+constexpr u32 kRwTextureBase = kRwBufferBase + kMaxStorageBuffers;
+constexpr u32 kHeapSlots = kRwTextureBase + kMaxStorageTextures;
+constexpr u32 kNoSlot = 0xFFFFFFFFu;
 constexpr DXGI_FORMAT kSwapchainFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kHdrFormat = DXGI_FORMAT_R11G11B10_FLOAT;   // scene/bloom targets (Target::Scene/Hdr, linear)
 constexpr DXGI_FORMAT kOverlayFormat = DXGI_FORMAT_R8G8B8A8_UNORM; // back buffer/Ldr targets: shaders write sRGB values (post/UI)
@@ -56,6 +62,7 @@ struct Device::Impl {
     ComPtr<ID3D12DescriptorHeap> srvHeap;
     UINT srvStride = 0;
     std::vector<u32> freeTextureSlots;
+    std::vector<u32> freeBufferSlots, freeRwBufferSlots, freeRwTextureSlots; // storage buffers/textures (compute): slot numbers within their range
 
     struct Frame {
         ComPtr<ID3D12CommandAllocator> allocator;
@@ -80,12 +87,14 @@ struct Device::Impl {
         ComPtr<ID3D12Resource> resource;
         u64 bytes = 0;
         BufferUsage usage = BufferUsage::Vertex;
+        u32 slot = kNoSlot, rwSlot = kNoSlot; // storage buffers: g_buffers[] / g_rwBuffers[] slots
     };
     std::vector<BufferEntry> buffers;
     struct TextureEntry {
         ComPtr<ID3D12Resource> resource;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         u32 slot = 0;
+        u32 rwSlot = kNoSlot; // storage textures: g_rwTextures[] slot
     };
     std::vector<TextureEntry> textures;
     // Offscreen targets: RTV + SRV on the color (a slot in textures), depth only for TargetKind::Scene (per target)
@@ -97,6 +106,8 @@ struct Device::Impl {
     };
     std::vector<TargetEntry> targets;
     std::vector<ComPtr<ID3D12PipelineState>> pipelines;
+    std::vector<u8> pipelineIsCompute; // parallel to pipelines
+    bool computeBound = false;         // the current pipeline is a compute one (root constants go to the compute root)
 
     // GPU time: kQueriesPerFrame slots per frame, results collected into a persistently mapped readback buffer
     ComPtr<ID3D12QueryHeap> queryHeap;

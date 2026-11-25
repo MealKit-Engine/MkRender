@@ -15,7 +15,10 @@
 
 namespace mkrhi {
 
-constexpr u32 kMaxBuffers = 16;    // g_buffers[] (binding 0)
+constexpr u32 kMaxBuffers = 256;   // g_buffers[] (binding 0; slot 0 is the upload ring)
+constexpr u32 kMaxStorageBuffers = 256; // g_rwBuffers[] (binding 5)
+constexpr u32 kMaxStorageTextures = 256; // g_rwTextures[] (binding 6)
+constexpr u32 kNoSlot = 0xFFFFFFFFu;
 constexpr u32 kMaxTextures = 4096; // g_textures[] (binding 1)
 constexpr u64 kUploadBytesPerFrame = 8ull << 20;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
@@ -63,6 +66,7 @@ struct Device::Impl {
     VkSampler linearClamp = VK_NULL_HANDLE;
     VkSampler linearWrap = VK_NULL_HANDLE; // model textures (repeat, anisotropy)
     std::vector<u32> freeTextureSlots;
+    std::vector<u32> freeBufferSlots, freeRwBufferSlots, freeRwTextureSlots; // storage buffers/textures (compute)
 
     struct Frame {
         VkCommandPool pool = VK_NULL_HANDLE;
@@ -85,6 +89,8 @@ struct Device::Impl {
         VkBuffer buffer = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
         BufferUsage usage = BufferUsage::Vertex;
+        u64 bytes = 0;
+        u32 slot = kNoSlot, rwSlot = kNoSlot; // storage buffers: g_buffers[] / g_rwBuffers[] slots
     };
     std::vector<BufferEntry> buffers;
     struct TextureEntry {
@@ -92,6 +98,7 @@ struct Device::Impl {
         VmaAllocation allocation = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         u32 slot = 0;
+        u32 rwSlot = kNoSlot; // storage textures: g_rwTextures[] slot
     };
     std::vector<TextureEntry> textures;
     // Offscreen targets: color image (a slot in textures, same view for read and draw), depth only for TargetKind::Scene (per target)
@@ -106,6 +113,8 @@ struct Device::Impl {
     std::vector<TargetEntry> targets;
     std::vector<std::pair<u32, u64>> imguiTextures; // Texture::id → debug UI descriptor set (imguiTextureId)
     std::vector<VkPipeline> pipelines;
+    std::vector<u8> pipelineIsCompute; // parallel to pipelines (the bind point)
+    bool computeBound = false;         // the current pipeline is a compute one (push constants go to the compute stage)
 
     // GPU time: kQueriesPerFrame slots per frame
     VkQueryPool queryPool = VK_NULL_HANDLE;

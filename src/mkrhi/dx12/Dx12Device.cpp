@@ -143,9 +143,16 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource, D3D12_RESOURCE_STATE
 }
 
 D3D12_RESOURCE_STATES toD3d(TextureState s) {
-    return s == TextureState::CopyDst ? D3D12_RESOURCE_STATE_COPY_DEST
-                                      : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    return s == TextureState::CopyDst           ? D3D12_RESOURCE_STATE_COPY_DEST
+           : s == TextureState::UnorderedAccess ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                                : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+}
+
+D3D12_RESOURCE_STATES toD3d(BufferState s) {
+    return s == BufferState::UnorderedAccess ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                             : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 }
 
 DXGI_FORMAT toDxgi(Format f) {
@@ -156,6 +163,8 @@ DXGI_FORMAT toDxgi(Format f) {
     case Format::Bc7Srgb: return DXGI_FORMAT_BC7_UNORM_SRGB;
     case Format::Bc5Unorm: return DXGI_FORMAT_BC5_UNORM;
     case Format::Rgb9e5: return DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+    case Format::Rgba16Float: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case Format::R32Float: return DXGI_FORMAT_R32_FLOAT;
     default: return DXGI_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -231,19 +240,20 @@ void Device::Impl::releaseSwapchainResources() {
 // Root signature shared by all pipelines: root constants (b0) + buffer table (t0, space1) + texture table (t0, space2) + samplers (s0)
 void Device::Impl::createRootSignature() {
     // Ranges: buffers (space1), 2D textures (space2), cubes (space3). Textures and cubes look at the same heap slots (each slot has only one kind of view)
-    D3D12_DESCRIPTOR_RANGE1 ranges[3] = {};
-    for (u32 i = 0; i < 3; ++i) {
-        ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    // Plus two UAV ranges (compute, G1): g_rwBuffers (u0, space1) and g_rwTextures (u0, space2), tables at kRwBufferBase / kRwTextureBase
+    D3D12_DESCRIPTOR_RANGE1 ranges[5] = {};
+    for (u32 i = 0; i < 5; ++i) {
+        ranges[i].RangeType = i < 3 ? D3D12_DESCRIPTOR_RANGE_TYPE_SRV : D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
         ranges[i].NumDescriptors = UINT_MAX; // unbounded array (binding tier 3)
         ranges[i].BaseShaderRegister = 0;
-        ranges[i].RegisterSpace = 1 + i;
+        ranges[i].RegisterSpace = i < 3 ? 1 + i : i - 2;
         ranges[i].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE; // unused slots may be empty
     }
-    D3D12_ROOT_PARAMETER1 params[4] = {};
+    D3D12_ROOT_PARAMETER1 params[6] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.Num32BitValues = Device::kPushConstantBytes / 4;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    for (u32 i = 0; i < 3; ++i) {
+    for (u32 i = 0; i < 5; ++i) {
         params[1 + i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         params[1 + i].DescriptorTable.NumDescriptorRanges = 1;
         params[1 + i].DescriptorTable.pDescriptorRanges = &ranges[i];
@@ -264,7 +274,7 @@ void Device::Impl::createRootSignature() {
 
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs{};
     rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    rs.Desc_1_1.NumParameters = 4;
+    rs.Desc_1_1.NumParameters = 6;
     rs.Desc_1_1.pParameters = params;
     rs.Desc_1_1.NumStaticSamplers = 2;
     rs.Desc_1_1.pStaticSamplers = samplers;
@@ -370,11 +380,14 @@ bool Device::init(const DeviceDesc& desc) {
 
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc{};
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvDesc.NumDescriptors = kMaxBuffers + kMaxTextures;
+    srvDesc.NumDescriptors = kHeapSlots;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     HR(m->device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&m->srvHeap)));
     m->srvStride = m->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     for (u32 i = kMaxBuffers + kMaxTextures; i > kMaxBuffers; --i) m->freeTextureSlots.push_back(i - 1);
+    for (u32 i = kMaxBuffers; i > 1; --i) m->freeBufferSlots.push_back(i - 1); // slot 0 = the upload ring
+    for (u32 i = kMaxStorageBuffers; i > 0; --i) m->freeRwBufferSlots.push_back(i - 1);
+    for (u32 i = kMaxStorageTextures; i > 0; --i) m->freeRwTextureSlots.push_back(i - 1);
 
     for (auto& frame : m->frames)
         HR(m->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frame.allocator)));
@@ -537,8 +550,113 @@ void Device::destroyBuffer(Buffer buffer) {
     Impl::BufferEntry& b = m->buffers[buffer.id - 1];
     if (!b.resource) return;
     m->waitIdle();
+    if (b.slot != kNoSlot) m->freeBufferSlots.push_back(b.slot);
+    if (b.rwSlot != kNoSlot) m->freeRwBufferSlots.push_back(b.rwSlot);
     b = {};
 }
+
+// ---------------------------------------------------------------- compute resources (G1; written on Linux, not built or run yet)
+
+Buffer Device::createStorageBuffer(u64 bytes) {
+    if (m->freeBufferSlots.empty() || m->freeRwBufferSlots.empty()) MKRHI_FATAL("Storage buffer slots exhausted (%u)", kMaxStorageBuffers);
+    bytes = (std::max<u64>(bytes, 4) + 3) & ~u64{3};
+    Impl::BufferEntry entry;
+    entry.bytes = bytes;
+    D3D12_RESOURCE_DESC desc = bufferDesc(bytes);
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+    // Starts in the ShaderRead state; committed default-heap memory is zero-filled by the runtime
+    HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &desc, toD3d(BufferState::ShaderRead), nullptr,
+                                          IID_PPV_ARGS(&entry.resource)));
+    entry.slot = m->freeBufferSlots.back();
+    m->freeBufferSlots.pop_back();
+    entry.rwSlot = m->freeRwBufferSlots.back();
+    m->freeRwBufferSlots.pop_back();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_R32_TYPELESS;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Buffer.NumElements = static_cast<UINT>(bytes / 4);
+    sv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    m->device->CreateShaderResourceView(entry.resource.Get(), &sv, m->srvCpu(entry.slot));
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+    uv.Format = DXGI_FORMAT_R32_TYPELESS;
+    uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uv.Buffer.NumElements = static_cast<UINT>(bytes / 4);
+    uv.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    m->device->CreateUnorderedAccessView(entry.resource.Get(), nullptr, &uv, m->srvCpu(kRwBufferBase + entry.rwSlot));
+    m->buffers.push_back(std::move(entry));
+    return {static_cast<u32>(m->buffers.size())};
+}
+
+u32 Device::bufferIndex(Buffer buffer) const { return m->buffers[buffer.id - 1].slot; }
+u32 Device::storageBufferIndex(Buffer buffer) const { return m->buffers[buffer.id - 1].rwSlot; }
+
+bool Device::readBuffer(Buffer buffer, u64 offset, void* dst, u64 bytes) {
+    if (!m || m->inFrame || !buffer || buffer.id > m->buffers.size()) return false;
+    const Impl::BufferEntry& b = m->buffers[buffer.id - 1];
+    if (!b.resource || offset + bytes > b.bytes) return false;
+    m->waitIdle();
+    const D3D12_HEAP_PROPERTIES readbackHeap = heapProperties(D3D12_HEAP_TYPE_READBACK);
+    const D3D12_RESOURCE_DESC desc = bufferDesc(bytes);
+    ComPtr<ID3D12Resource> readback;
+    HR(m->device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                          IID_PPV_ARGS(&readback)));
+    ComPtr<ID3D12CommandAllocator> allocator;
+    HR(m->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
+    ComPtr<ID3D12GraphicsCommandList> list;
+    HR(m->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)));
+    D3D12_RESOURCE_BARRIER barrier = transition(b.resource.Get(), toD3d(BufferState::ShaderRead), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->ResourceBarrier(1, &barrier);
+    list->CopyBufferRegion(readback.Get(), 0, b.resource.Get(), offset, bytes);
+    barrier = transition(b.resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, toD3d(BufferState::ShaderRead));
+    list->ResourceBarrier(1, &barrier);
+    HR(list->Close());
+    ID3D12CommandList* lists[] = {list.Get()};
+    m->queue->ExecuteCommandLists(1, lists);
+    m->waitIdle();
+    void* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
+    HR(readback->Map(0, &range, &mapped));
+    std::memcpy(dst, mapped, bytes);
+    readback->Unmap(0, nullptr);
+    return true;
+}
+
+Texture Device::createStorageTexture(u32 width, u32 height, Format format) {
+    if (m->freeRwTextureSlots.empty()) MKRHI_FATAL("Storage texture slots exhausted (%u)", kMaxStorageTextures);
+    Impl::TextureEntry entry;
+    entry.format = toDxgi(format);
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = width;
+    td.Height = height;
+    td.DepthOrArraySize = 1;
+    td.MipLevels = 1;
+    td.Format = entry.format;
+    td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const D3D12_HEAP_PROPERTIES defaultHeap = heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+    HR(m->device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &td, toD3d(TextureState::ShaderRead), nullptr,
+                                          IID_PPV_ARGS(&entry.resource)));
+    entry.slot = m->allocTextureSlot();
+    entry.rwSlot = m->freeRwTextureSlots.back();
+    m->freeRwTextureSlots.pop_back();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = entry.format;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    m->device->CreateShaderResourceView(entry.resource.Get(), &sd, m->srvCpu(entry.slot));
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = entry.format;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    m->device->CreateUnorderedAccessView(entry.resource.Get(), nullptr, &ud, m->srvCpu(kRwTextureBase + entry.rwSlot));
+    m->textures.push_back(std::move(entry));
+    return {static_cast<u32>(m->textures.size())};
+}
+
+u32 Device::storageTextureIndex(Texture texture) const { return m->textures[texture.id - 1].rwSlot; }
 
 Texture Device::createTexture(u32 width, u32 height, Format format) {
     Impl::TextureEntry entry;
@@ -822,17 +940,40 @@ Pipeline Device::createPipeline(const PipelineDesc& desc) {
         }
     }
     m->pipelines.push_back(std::move(pso));
+    m->pipelineIsCompute.push_back(0);
     return {static_cast<u32>(m->pipelines.size())};
 }
 
+Pipeline Device::createComputePipeline(const ComputePipelineDesc& desc) {
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = m->rootSignature.Get();
+    pd.CS = {desc.cs.data, desc.cs.size};
+    ComPtr<ID3D12PipelineState> pso;
+    HR(m->device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso))); // not stored in the pipeline library (graphics only)
+    m->pipelines.push_back(std::move(pso));
+    m->pipelineIsCompute.push_back(1);
+    return {static_cast<u32>(m->pipelines.size())};
+}
+
+bool Device::recreatePipeline(Pipeline pipeline, const ComputePipelineDesc& desc) {
+    if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size() || !m->pipelineIsCompute[pipeline.id - 1]) return false;
+    m->waitIdle();
+    createComputePipeline(desc);
+    m->pipelines[pipeline.id - 1] = std::move(m->pipelines.back());
+    m->pipelines.pop_back();
+    m->pipelineIsCompute.pop_back();
+    return true;
+}
+
 bool Device::recreatePipeline(Pipeline pipeline, const PipelineDesc& desc) {
-    if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size()) return false;
+    if (!m || m->inFrame || !pipeline || pipeline.id > m->pipelines.size() || m->pipelineIsCompute[pipeline.id - 1]) return false;
     m->waitIdle();
     ComPtr<ID3D12PipelineLibrary1> library = std::move(m->library); // hot reload: not cached (the file would only grow)
     createPipeline(desc); // the new one appended at the end goes into the original slot
     m->library = std::move(library);
     m->pipelines[pipeline.id - 1] = std::move(m->pipelines.back());
     m->pipelines.pop_back();
+    m->pipelineIsCompute.pop_back();
     return true;
 }
 
@@ -1126,15 +1267,29 @@ void CommandList::setPipeline(Pipeline pipeline) {
     // The debug UI may have bound its own root signature/heap, so rebind every time (root constants after this)
     ID3D12DescriptorHeap* heaps[] = {m->srvHeap.Get()};
     list->SetDescriptorHeaps(1, heaps);
+    m->computeBound = m->pipelineIsCompute[pipeline.id - 1] != 0;
+    if (m->computeBound) {
+        list->SetComputeRootSignature(m->rootSignature.Get());
+        list->SetComputeRootDescriptorTable(1, m->srvGpu(0));
+        list->SetComputeRootDescriptorTable(2, m->srvGpu(kMaxBuffers));
+        list->SetComputeRootDescriptorTable(3, m->srvGpu(kMaxBuffers)); // cubes (same slots)
+        list->SetComputeRootDescriptorTable(4, m->srvGpu(kRwBufferBase));
+        list->SetComputeRootDescriptorTable(5, m->srvGpu(kRwTextureBase));
+        return;
+    }
     list->SetGraphicsRootSignature(m->rootSignature.Get());
     list->SetGraphicsRootDescriptorTable(1, m->srvGpu(0));
     list->SetGraphicsRootDescriptorTable(2, m->srvGpu(kMaxBuffers));
     list->SetGraphicsRootDescriptorTable(3, m->srvGpu(kMaxBuffers)); // cubes (same slots)
+    list->SetGraphicsRootDescriptorTable(4, m->srvGpu(kRwBufferBase));
+    list->SetGraphicsRootDescriptorTable(5, m->srvGpu(kRwTextureBase));
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
 void CommandList::pushConstants(const void* data, u32 bytes) {
-    m_device->impl()->list->SetGraphicsRoot32BitConstants(0, bytes / 4, data, 0);
+    Device::Impl* m = m_device->impl();
+    if (m->computeBound) m->list->SetComputeRoot32BitConstants(0, bytes / 4, data, 0);
+    else m->list->SetGraphicsRoot32BitConstants(0, bytes / 4, data, 0);
 }
 
 void CommandList::setVertexBuffer(Buffer buffer, u32 stride) {
@@ -1162,6 +1317,23 @@ void CommandList::textureBarrier(Texture texture, TextureState before, TextureSt
     Device::Impl* m = m_device->impl();
     const D3D12_RESOURCE_BARRIER b = transition(m->textures[texture.id - 1].resource.Get(), toD3d(before), toD3d(after));
     m->list->ResourceBarrier(1, &b);
+}
+
+void CommandList::dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) {
+    m_device->impl()->list->Dispatch(groupsX, groupsY, groupsZ);
+}
+
+void CommandList::bufferBarrier(Buffer buffer, BufferState before, BufferState after) {
+    if (before == after) return;
+    Device::Impl* m = m_device->impl();
+    const D3D12_RESOURCE_BARRIER b = transition(m->buffers[buffer.id - 1].resource.Get(), toD3d(before), toD3d(after));
+    m->list->ResourceBarrier(1, &b);
+}
+
+void CommandList::uavBarrier() {
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; // null resource: every UAV access
+    m_device->impl()->list->ResourceBarrier(1, &b);
 }
 
 void CommandList::copyToTexture(Texture texture, u32 x, u32 y, u32 width, u32 height, u64 uploadOffset, u32 rowPitch) {

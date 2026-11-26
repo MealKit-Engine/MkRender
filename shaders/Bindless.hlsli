@@ -7,9 +7,29 @@
 // arrays can replace their bodies. MKRHI_WEBGPU (WebGPU, work in progress): no resource arrays, see the block below.
 
 #if MKRHI_WEBGPU
-// WebGPU: SPIR-V for Tint (SPIR-V 1.3, no SPV_EXT_descriptor_indexing). Group 0: upload ring + samplers. Group 2: direct slots,
-// separately bound textures picked by the index (pool 31 = direct, bits 18..11 = slot): 16 2D (bindings 0..15), 4 cubes (16..19) and
-// 4 depth textures (20..23, shadow maps read with a comparison sampler), mkrhi/webgpu/Wgpu.h kDirectTextures/kDirectCubes/kDirectDepths. Group 1 (texture array pools) is not done yet, so every texture is direct for now.
+// WebGPU: SPIR-V for Tint (SPIR-V 1.3, no SPV_EXT_descriptor_indexing). Group 0: upload ring + samplers.
+// Group 0 also holds the storage buffers for reading (bindings 5..8, mkBufferLoad: index 1 + slot; 0 = the ring).
+// Group 1: texture array pools, one per format and size class (pool = format * 2 + class, class 0 = 512, 1 = 2048; mkrhi/webgpu/Wgpu.h
+// kPools), then the Rgb9e5 cube array pools 10 (512) and 11 (2048). Index: pool bits 23..19, layer 18..11, mip bias 10..8 (the pool
+// mip the texture's mip 0 sits in), last mip 7..0.
+// Group 2: direct slots, separately bound textures (pool 31, bits 18..11 = slot): 24 2D (bindings 0..23), 4 cubes (24..27) and
+// 4 depth textures (28..31, shadow maps read with a comparison sampler), Wgpu.h kDirectTextures/kDirectCubes/kDirectDepths.
+[[vk::binding(0, 1)]] Texture2DArray g_pool0;
+[[vk::binding(1, 1)]] Texture2DArray g_pool1;
+[[vk::binding(2, 1)]] Texture2DArray g_pool2;
+[[vk::binding(3, 1)]] Texture2DArray g_pool3;
+[[vk::binding(4, 1)]] Texture2DArray g_pool4;
+[[vk::binding(5, 1)]] Texture2DArray g_pool5;
+[[vk::binding(6, 1)]] Texture2DArray g_pool6;
+[[vk::binding(7, 1)]] Texture2DArray g_pool7;
+[[vk::binding(8, 1)]] Texture2DArray g_pool8;
+[[vk::binding(9, 1)]] Texture2DArray g_pool9;
+[[vk::binding(10, 1)]] TextureCubeArray g_cubePool0;
+[[vk::binding(11, 1)]] TextureCubeArray g_cubePool1;
+[[vk::binding(5, 0)]] ByteAddressBuffer g_storage0;
+[[vk::binding(6, 0)]] ByteAddressBuffer g_storage1;
+[[vk::binding(7, 0)]] ByteAddressBuffer g_storage2;
+[[vk::binding(8, 0)]] ByteAddressBuffer g_storage3;
 [[vk::binding(0, 0)]] ByteAddressBuffer g_ring;
 [[vk::binding(2, 0)]] SamplerState g_linearClamp;
 [[vk::binding(3, 0)]] SamplerState g_linearWrap;
@@ -30,14 +50,22 @@
 [[vk::binding(13, 2)]] Texture2D g_direct13;
 [[vk::binding(14, 2)]] Texture2D g_direct14;
 [[vk::binding(15, 2)]] Texture2D g_direct15;
-[[vk::binding(16, 2)]] TextureCube g_directCube0;
-[[vk::binding(17, 2)]] TextureCube g_directCube1;
-[[vk::binding(18, 2)]] TextureCube g_directCube2;
-[[vk::binding(19, 2)]] TextureCube g_directCube3;
-[[vk::binding(20, 2)]] Texture2D g_directDepth0; // GatherCmp makes these texture_depth_2d in WGSL
-[[vk::binding(21, 2)]] Texture2D g_directDepth1; // GatherCmp makes these texture_depth_2d in WGSL
-[[vk::binding(22, 2)]] Texture2D g_directDepth2; // GatherCmp makes these texture_depth_2d in WGSL
-[[vk::binding(23, 2)]] Texture2D g_directDepth3; // GatherCmp makes these texture_depth_2d in WGSL
+[[vk::binding(16, 2)]] Texture2D g_direct16;
+[[vk::binding(17, 2)]] Texture2D g_direct17;
+[[vk::binding(18, 2)]] Texture2D g_direct18;
+[[vk::binding(19, 2)]] Texture2D g_direct19;
+[[vk::binding(20, 2)]] Texture2D g_direct20;
+[[vk::binding(21, 2)]] Texture2D g_direct21;
+[[vk::binding(22, 2)]] Texture2D g_direct22;
+[[vk::binding(23, 2)]] Texture2D g_direct23;
+[[vk::binding(24, 2)]] TextureCube g_directCube0;
+[[vk::binding(25, 2)]] TextureCube g_directCube1;
+[[vk::binding(26, 2)]] TextureCube g_directCube2;
+[[vk::binding(27, 2)]] TextureCube g_directCube3;
+[[vk::binding(28, 2)]] Texture2D g_directDepth0; // GatherCmp makes these texture_depth_2d in WGSL
+[[vk::binding(29, 2)]] Texture2D g_directDepth1; // GatherCmp makes these texture_depth_2d in WGSL
+[[vk::binding(30, 2)]] Texture2D g_directDepth2; // GatherCmp makes these texture_depth_2d in WGSL
+[[vk::binding(31, 2)]] Texture2D g_directDepth3; // GatherCmp makes these texture_depth_2d in WGSL
 #else
 [[vk::binding(0, 0)]] ByteAddressBuffer g_buffers[] : register(t0, space1);
 [[vk::binding(1, 0)]] Texture2D g_textures[] : register(t0, space2);
@@ -50,10 +78,51 @@ float3 loadFloat3(ByteAddressBuffer b, uint offset) { return asfloat(b.Load3(off
 float4 loadFloat4(ByteAddressBuffer b, uint offset) { return asfloat(b.Load4(offset)); }
 
 #if MKRHI_WEBGPU
-// Graphics shaders only read the upload ring, so every buffer index is the ring
+// mkBuffer is for the upload ring (pc.ring: a uniform choice WGSL can't make between buffers): every index is the ring.
+// Other buffers (storage buffers through bufferIndex) are read with mkBufferLoad / mkBufferLoad4
 ByteAddressBuffer mkBuffer(uint index) { return g_ring; }
+uint mkBufferLoad(uint index, uint offset)
+{
+    switch (index) {
+    case 0: return g_ring.Load(offset);
+    case 1: return g_storage0.Load(offset);
+    case 2: return g_storage1.Load(offset);
+    case 3: return g_storage2.Load(offset);
+    default: return g_storage3.Load(offset);
+    }
+}
+uint4 mkBufferLoad4(uint index, uint offset)
+{
+    switch (index) {
+    case 0: return g_ring.Load4(offset);
+    case 1: return g_storage0.Load4(offset);
+    case 2: return g_storage1.Load4(offset);
+    case 3: return g_storage2.Load4(offset);
+    default: return g_storage3.Load4(offset);
+    }
+}
 
+uint mkPool(uint index) { return (index >> 19) & 31u; }
+bool mkIsDirect(uint index) { return mkPool(index) == 31u; }
 uint mkDirectSlot(uint index) { return (index >> 11) & 0xFFu; }
+float mkPoolLayer(uint index) { return float((index >> 11) & 0xFFu); }
+uint mkMipBias(uint index) { return (index >> 8) & 7u; }
+uint mkLastMip(uint index) { return index & 0xFFu; }
+// Size of the pooled texture itself (its mip 0 = the pool's mip bias)
+uint2 mkPoolSize(uint index) { return ((mkPool(index) & 1u) ? 2048u : 512u).xx >> mkMipBias(index); }
+// Runs `body` with `t` bound to the pool array of `index`
+#define MK_POOL_2D(index, body) \
+    switch (mkPool(index)) { \
+    case 0: { Texture2DArray t = g_pool0; body; } \
+    case 1: { Texture2DArray t = g_pool1; body; } \
+    case 2: { Texture2DArray t = g_pool2; body; } \
+    case 3: { Texture2DArray t = g_pool3; body; } \
+    case 4: { Texture2DArray t = g_pool4; body; } \
+    case 5: { Texture2DArray t = g_pool5; body; } \
+    case 6: { Texture2DArray t = g_pool6; body; } \
+    case 7: { Texture2DArray t = g_pool7; body; } \
+    case 8: { Texture2DArray t = g_pool8; body; } \
+    default: { Texture2DArray t = g_pool9; body; } }
 // Runs `body` with `t` bound to the direct slot of `index` (each case is a static choice, which SPIR-V legalization needs)
 #define MK_DIRECT_2D(index, body) \
     switch (mkDirectSlot(index)) { \
@@ -72,31 +141,80 @@ uint mkDirectSlot(uint index) { return (index >> 11) & 0xFFu; }
     case 12: { Texture2D t = g_direct12; body; } \
     case 13: { Texture2D t = g_direct13; body; } \
     case 14: { Texture2D t = g_direct14; body; } \
-    default: { Texture2D t = g_direct15; body; } }
+    case 15: { Texture2D t = g_direct15; body; } \
+    case 16: { Texture2D t = g_direct16; body; } \
+    case 17: { Texture2D t = g_direct17; body; } \
+    case 18: { Texture2D t = g_direct18; body; } \
+    case 19: { Texture2D t = g_direct19; body; } \
+    case 20: { Texture2D t = g_direct20; body; } \
+    case 21: { Texture2D t = g_direct21; body; } \
+    case 22: { Texture2D t = g_direct22; body; } \
+    default: { Texture2D t = g_direct23; body; } }
 
-// Derivatives are taken before the switch: WGSL allows implicit-derivative sampling only in uniform control flow
-float4 mkSample2D(uint index, SamplerState s, float2 uv)
-{
-    float2 dx = ddx(uv), dy = ddy(uv);
-    MK_DIRECT_2D(index, return t.SampleGrad(s, uv, dx, dy));
-}
-float4 mkSampleLevel2D(uint index, SamplerState s, float2 uv, float lod) { MK_DIRECT_2D(index, return t.SampleLevel(s, uv, lod)); }
-float4 mkGatherRed2D(uint index, SamplerState s, float2 uv) { MK_DIRECT_2D(index, return t.GatherRed(s, uv)); }
-float4 mkLoad2D(uint index, int2 texel, int mip) { MK_DIRECT_2D(index, return t.Load(int3(texel, mip))); }
 uint2 mkTextureSize2D(uint index)
 {
+    if (!mkIsDirect(index)) return mkPoolSize(index);
     uint w, h;
     MK_DIRECT_2D(index, t.GetDimensions(w, h); return uint2(w, h));
 }
-// WGSL has no LOD query: the level from the derivatives, as the hardware computes it for isotropic filtering
-float mkLod2D(uint index, SamplerState s, float2 uv)
+// Level of detail from the derivatives in the texture's own texels (isotropic, unclamped)
+float mkLodFromGrad(uint index, float2 dx, float2 dy)
 {
     float2 size = float2(mkTextureSize2D(index));
-    float2 dx = ddx(uv) * size, dy = ddy(uv) * size;
-    return max(0.5 * log2(max(dot(dx, dx), dot(dy, dy))), 0.0);
+    dx *= size;
+    dy *= size;
+    return 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));
+}
+// Derivatives are taken before the switch: WGSL allows implicit-derivative sampling only in uniform control flow.
+// Pooled: the pool mips below the bias are empty and those past the texture's last mip belong to nothing, so magnification reads
+// the bias mip and minification past the last mip reads that last mip (what the hardware does for a texture of its own). In between
+// SampleGrad picks the mip (bias included: the pool's texels are 2^bias times smaller in UV), anisotropy intact
+float4 mkSample2D(uint index, SamplerState s, float2 uv)
+{
+    float2 dx = ddx(uv), dy = ddy(uv);
+    if (mkIsDirect(index)) { MK_DIRECT_2D(index, return t.SampleGrad(s, uv, dx, dy)); }
+    float lod = mkLodFromGrad(index, dx, dy);
+    float3 c = float3(uv, mkPoolLayer(index));
+    float bias = float(mkMipBias(index)), last = float(mkLastMip(index));
+    if (lod <= 0.0) { MK_POOL_2D(index, return t.SampleLevel(s, c, bias)); }
+    if (lod >= last) { MK_POOL_2D(index, return t.SampleLevel(s, c, bias + last)); }
+    MK_POOL_2D(index, return t.SampleGrad(s, c, dx, dy));
+}
+float4 mkSampleLevel2D(uint index, SamplerState s, float2 uv, float lod)
+{
+    if (mkIsDirect(index)) { MK_DIRECT_2D(index, return t.SampleLevel(s, uv, lod)); }
+    float level = float(mkMipBias(index)) + clamp(lod, 0.0, float(mkLastMip(index)));
+    MK_POOL_2D(index, return t.SampleLevel(s, float3(uv, mkPoolLayer(index)), level));
+}
+float4 mkLoad2D(uint index, int2 texel, int mip)
+{
+    if (mkIsDirect(index)) { MK_DIRECT_2D(index, return t.Load(int3(texel, mip))); }
+    MK_POOL_2D(index, return t.Load(int4(texel, int(mkPoolLayer(index)), mip + int(mkMipBias(index)))));
+}
+// Pooled: from four loads of the texture's mip 0 (a gather reads the array's mip 0), edges clamped
+float4 mkGatherRed2D(uint index, SamplerState s, float2 uv)
+{
+    if (mkIsDirect(index)) { MK_DIRECT_2D(index, return t.GatherRed(s, uv)); }
+    int2 size = int2(mkPoolSize(index));
+    int2 p = int2(floor(uv * float2(size) - 0.5));
+    int2 a = clamp(p, 0, size - 1), b = clamp(p + 1, 0, size - 1);
+    return float4(mkLoad2D(index, int2(a.x, b.y), 0).r, mkLoad2D(index, b, 0).r, mkLoad2D(index, int2(b.x, a.y), 0).r, mkLoad2D(index, a, 0).r);
+}
+// WGSL has no LOD query: the level from the derivatives, as the hardware computes it for isotropic filtering (pooled: clamped to
+// the texture's mips like CalculateLevelOfDetail)
+float mkLod2D(uint index, SamplerState s, float2 uv)
+{
+    float lod = max(mkLodFromGrad(index, ddx(uv), ddy(uv)), 0.0);
+    return mkIsDirect(index) ? lod : min(lod, float(mkLastMip(index)));
 }
 float4 mkSampleCubeLevel(uint index, SamplerState s, float3 dir, float lod)
 {
+    if (!mkIsDirect(index)) {
+        float4 c = float4(dir, mkPoolLayer(index));
+        float level = float(mkMipBias(index)) + clamp(lod, 0.0, float(mkLastMip(index)));
+        if (mkPool(index) == 10u) return g_cubePool0.SampleLevel(s, c, level);
+        return g_cubePool1.SampleLevel(s, c, level);
+    }
     switch (mkDirectSlot(index)) {
     case 0: return g_directCube0.SampleLevel(s, dir, lod);
     case 1: return g_directCube1.SampleLevel(s, dir, lod);
@@ -118,6 +236,8 @@ float4 mkShadowGather(uint index, float2 uv, float receiver)
 #else
 // DX12/Vulkan: the plain array access (indices may be non-uniform: material textures differ per pixel)
 ByteAddressBuffer mkBuffer(uint index) { return g_buffers[index]; }
+uint mkBufferLoad(uint index, uint offset) { return g_buffers[index].Load(offset); }
+uint4 mkBufferLoad4(uint index, uint offset) { return g_buffers[index].Load4(offset); }
 float4 mkSample2D(uint index, SamplerState s, float2 uv) { return g_textures[NonUniformResourceIndex(index)].Sample(s, uv); }
 float4 mkSampleLevel2D(uint index, SamplerState s, float2 uv, float lod) { return g_textures[NonUniformResourceIndex(index)].SampleLevel(s, uv, lod); }
 float4 mkGatherRed2D(uint index, SamplerState s, float2 uv) { return g_textures[NonUniformResourceIndex(index)].GatherRed(s, uv); }

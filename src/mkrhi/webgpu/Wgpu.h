@@ -1,24 +1,50 @@
 #pragma once
 
 // WebGPU backend internals (only rhi/webgpu/ files include this). Dawn's C++ API (webgpu_cpp.h), Linux X11 surfaces for now.
-// Work in progress: WebGPU has no descriptor arrays, so textures sit in
-// "direct slots" (separately bound, picked by the index, shaders/Bindless.hlsli MKRHI_WEBGPU). Texture array pools, compute, GPU timers,
-// ImGui and the pipeline cache are not done yet.
+// Work in progress: WebGPU has no descriptor arrays. Asset textures go into texture array pools (group 1: one texture_2d_array per
+// format and size class, the index names pool + layer + mip bias), the rest into "direct slots" (group 2: separately bound, picked by
+// the index). shaders/Bindless.hlsli MKRHI_WEBGPU decodes both. Compute adds group 3 (storage
+// buffers and textures, shaders/Compute.hlsli). Debug UI: WgpuImGui.cpp.
 #include "mkrhi/Rhi.h"
 
 #include <webgpu/webgpu_cpp.h>
 
 #include <array>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace mkrhi {
 
-constexpr u32 kDirectTextures = 16; // group 2 bindings 0..15 (Bindless.hlsli g_direct*)
-constexpr u32 kDirectCubes = 4;     // group 2 bindings 16..19 (g_directCube*)
-constexpr u32 kDirectDepths = 4;    // group 2 bindings 20..23 (g_directDepth*: shadow maps, texture_depth_2d)
+// Render targets live here (a post chain takes 7: scene, 5 bloom, output; the editor runs several chains), so 24 2D slots
+constexpr u32 kDirectTextures = 24; // group 2 bindings 0..23 (Bindless.hlsli g_direct*)
+constexpr u32 kDirectCubes = 4;     // group 2 bindings 24..27 (g_directCube*)
+constexpr u32 kDirectDepths = 4;    // group 2 bindings 28..31 (g_directDepth*: shadow maps, texture_depth_2d)
 constexpr u32 kDirectBindings = kDirectTextures + kDirectCubes + kDirectDepths;
-constexpr u32 kDirectPool = 31;     // index bits 23..19 for a direct slot (pools 0..30 come later)
+constexpr u32 kDirectPool = 31;     // index bits 23..19 for a direct slot (pools are 0..kPools-1)
+// Texture array pools: pool = format * kPoolClasses + size class (Bindless.hlsli g_pool*). Formats in poolFormat order
+constexpr u32 kPoolFormats = 5;     // Rgba8Unorm, Rgba8Srgb, Bc7Unorm, Bc7Srgb, Bc5Unorm
+constexpr u32 kPoolClasses = 2;
+constexpr u32 kPools = kPoolFormats * kPoolClasses;
+constexpr u32 kPoolClassLog2[kPoolClasses] = {9, 11}; // 512 and 2048 (Bindless.hlsli mkPoolSize)
+constexpr u32 kPoolFirstLayers[kPoolClasses] = {16, 4}; // grows ×2 when full (a 2048 BC7 layer with mips is ~5.6 MB)
+constexpr u32 kPoolMaxLayers = 256;     // index bits 18..11
+constexpr u32 kPoolMaxBias = 7;         // index bits 10..8
+// Cube pools (Rgb9e5 texture_cube_array, the same two size classes) come after the 2D pools: pool kPools + class
+constexpr u32 kCubePools = kPoolClasses;
+constexpr u32 kAllPools = kPools + kCubePools;
+constexpr u32 kCubePoolFirstLayers[kPoolClasses] = {4, 1}; // cubes (a 2048 Rgb9e5 cube with mips is ~134 MB)
+// Compute group 3 (Compute.hlsli): storage buffers at bindings 0..3, then kStorageTexturesPerFormat storage textures per format
+// (rgba8unorm, rgba16float, r32float: WGSL types storage textures by format). Storage texture index = format * 2 + slot
+constexpr u32 kStorageBuffers = 4;
+constexpr u32 kStorageFormats = 3;
+constexpr u32 kStorageTexturesPerFormat = 2;
+constexpr u32 kStorageTextures = kStorageFormats * kStorageTexturesPerFormat;
+constexpr u32 kStorageBindings = kStorageBuffers + kStorageTextures;
+// Group 0 also holds the storage buffers for reading (bindings 5..8, Bindless.hlsli mkBufferLoad): bufferIndex = 1 + slot, 0 = ring
+constexpr u32 kGroup0Bindings = 4 + kStorageBuffers;
 constexpr u64 kUploadBytesPerFrame = 8ull << 20;
 constexpr wgpu::TextureFormat kHdrFormat = wgpu::TextureFormat::RG11B10Ufloat; // scene/bloom targets (Target::Scene/Hdr, linear)
 constexpr wgpu::TextureFormat kDepthFormat = wgpu::TextureFormat::Depth32Float;
@@ -36,10 +62,11 @@ struct Device::Impl {
     bool vsync = true;
     bool surfaceDirty = true;
 
-    // Group 0: upload ring + samplers. Group 1: empty (texture array pools later). Group 2: direct slots. 64 bytes of immediates
+    // Group 0: upload ring + samplers. Group 1: texture array pools. Group 2: direct slots. 64 bytes of immediates
     wgpu::Sampler linearClamp, linearWrap, shadowCompare;
-    wgpu::BindGroupLayout layout0, layout1, layout2;
-    wgpu::PipelineLayout pipelineLayout;
+    wgpu::BindGroupLayout layout0, layout1, layout2, layout3;
+    wgpu::PipelineLayout pipelineLayout, computeLayout; // compute: groups 0..2 like graphics + group 3
+    bool float32Filterable = false; // R32Float storage textures can also be read through a direct slot
     wgpu::BindGroup group0, group1;
     // Direct slot contents (Texture::id, 0 = empty) and the group 2 variants built from them: one per texture left out (the color or
     // depth target bound in the current pass, which a pass can't also read). Rebuilt after a slot changes
@@ -47,8 +74,17 @@ struct Device::Impl {
     std::array<u32, kDirectCubes> cubeSlots{};
     std::array<u32, kDirectDepths> depthSlots{};
     std::vector<std::pair<u32, wgpu::BindGroup>> group2Cache;
-    wgpu::Texture dummy2D, dummyCube, dummyDepth;
-    wgpu::TextureView dummy2DView, dummyCubeView, dummyDepthView;
+    wgpu::Texture dummy2D, dummyCube, dummyDepth, dummyArray;
+    wgpu::TextureView dummy2DView, dummyCubeView, dummyDepthView, dummyArrayView;
+
+    // Pools are created with their first texture (an empty pool binds dummyArray). Layers aren't freed (textures live until shutdown)
+    struct Pool {
+        wgpu::Texture texture;
+        wgpu::TextureView view;
+        u32 layers = 0, used = 0;
+    };
+    std::array<Pool, kAllPools> pools;
+    wgpu::TextureView dummyCubeArrayView;
 
     // Upload ring: written on the CPU, sent with queue.WriteBuffer before the frame's submit (WebGPU has no persistent mapping)
     wgpu::Buffer ring;
@@ -58,14 +94,23 @@ struct Device::Impl {
     struct BufferEntry {
         wgpu::Buffer buffer;
         BufferUsage usage = BufferUsage::Vertex;
+        bool storage = false;
+        u32 storageSlot = 0;
+        u64 bytes = 0;
+        bool unordered = false; // BufferState::UnorderedAccess: bound for writing in group 3, otherwise for reading in group 0
     };
     std::vector<BufferEntry> buffers;
     struct TextureEntry {
         wgpu::Texture texture;
-        wgpu::TextureView view;
-        u32 slot = 0;
+        wgpu::TextureView view, storageView;
+        u32 slot = 0;      // direct slot, or the layer of a pooled texture
+        u32 index = 0;     // textureIndex() (pooled textures: pool, layer, mip bias, last mip)
+        bool pooled = false;
         bool cube = false;
         bool depth = false; // depth texture: a depth slot (shadow maps, read only through mkShadowGather)
+        bool storage = false; // storage texture (compute): also in storageTextureSlots
+        u32 storageSlot = 0;  // storage texture index (format * kStorageTexturesPerFormat + slot)
+        bool unordered = false; // in TextureState::UnorderedAccess: bound for writing in group 3, left out of group 2 in dispatches
     };
     std::vector<TextureEntry> textures;
     struct TargetEntry {
@@ -77,7 +122,16 @@ struct Device::Impl {
         bool ldr = false; // TargetKind::Ldr: the swap chain's 8-bit format
     };
     std::vector<TargetEntry> targets;
-    std::vector<wgpu::RenderPipeline> pipelines;
+    std::vector<wgpu::RenderPipeline> pipelines;         // per Pipeline handle: one of the two is set
+    std::vector<wgpu::ComputePipeline> computePipelines;
+    // Storage slots (Buffer::id / Texture::id, 0 = empty) and empty-slot stand-ins; dispatch bind groups rebuilt after a change
+    std::array<u32, kStorageBuffers> storageBufferSlots{};
+    std::array<u32, kStorageTextures> storageTextureSlots{};
+    std::array<wgpu::Buffer, kStorageBuffers> dummyStorage; // one per slot: writable bindings of one buffer may not alias
+    std::array<wgpu::Buffer, kStorageBuffers> dummyRead;    // group 0 read slots (separate: a buffer can't be read and written in one dispatch)
+    std::array<wgpu::TextureView, kStorageTextures> dummyStorageViews; // one per slot, in the slot's format (no aliasing either)
+    wgpu::BindGroup computeGroup2, computeGroup3;
+    bool computeGroupsDirty = true;
 
     // Frame
     CommandList cmd;
@@ -98,21 +152,67 @@ struct Device::Impl {
     u32 pushBytes = 0;
     struct Applied {
         u32 pipeline = 0, vertexBuffer = 0, indexBuffer = 0;
-        WGPUBindGroup group2 = nullptr;
+        WGPUBindGroup group0 = nullptr, group1 = nullptr, group2 = nullptr;
         f32 viewport[4] = {-1, -1, -1, -1};
         bool push = false;
     } applied;
 
+    // Pipeline cache (DeviceDesc::pipelineCache): Dawn's key/value blobs (compiled shaders and driver pipeline data), kept in memory,
+    // read from <folder>/pipelines.webgpu on init and written on shutdown when something was added. Dawn may call from its own threads
+    struct PipelineCache {
+        std::mutex lock;
+        std::unordered_map<std::string, std::string> entries;
+        std::string path;
+        bool dirty = false;
+    } cache;
+    void loadCache(const std::string& folder);
+    void saveCache();
+
+    // Debug UI drawing (WgpuImGui.cpp, MKRHI_IMGUI_TARGET builds): created by imguiInit
+    struct ImGuiState;
+    ImGuiState* imgui = nullptr;
+
     u32 width = 0, height = 0;
     GpuInfo gpu;
     GpuTimes gpuTimes;
+    // GPU timers (timestamp queries, optional feature). WebGPU writes timestamps only at the start and end of passes
+    // (timestampWrites), so marks attach to passes: the frame start and timer begins to the start of the next pass, timer ends and the
+    // frame end to the end of the current or last pass. Marks name "physical" queries of this frame (up to kQueriesPerFrame), resolved
+    // and copied to a readback buffer at endFrame and read when that frame index comes around again (kFramesInFlight late)
+    static constexpr u32 kQueriesPerFrame = 128;
+    static constexpr u32 kMarks = 2 + 2 * kMaxGpuTimers; // frame start, frame end, then begin/end per timer
+    static constexpr u32 kNoQuery = ~0u;
+    bool timestamps = false;
+    wgpu::QuerySet querySet;
+    wgpu::Buffer queryResolve;
+    struct TimerFrame {
+        wgpu::Buffer readback;
+        wgpu::Future mapped{};
+        bool pending = false;
+        u32 queries = 0;                     // physical queries used
+        std::array<u32, kMarks> marks{};     // physical query of each mark (kNoQuery = not written)
+        u32 pendingBegins = 0;               // marks waiting for the next pass start (bits)
+        u32 passEnd = kNoQuery;              // physical query at the end of the current or last pass
+    };
+    std::array<TimerFrame, kFramesInFlight> timerFrames;
+    wgpu::PassTimestampWrites passTimestamps; // filled by nextPassTimestamps
+    const wgpu::PassTimestampWrites* nextPassTimestamps(); // for the pass about to begin (nullptr: none)
+    void readTimers(TimerFrame& frame);
     std::string initError;
 
     bool configureSurface();
     void endPass();
     void beginPass(const wgpu::RenderPassDescriptor& desc, u32 exclude, u32 w, u32 h);
     wgpu::BindGroup group2(u32 exclude);
-    void slotsChanged() { group2Cache.clear(); }
+    wgpu::BindGroup buildGroup2(u32 exclude, bool skipUnordered);
+    void buildComputeGroups();
+    void slotsChanged() {
+        group2Cache.clear();
+        computeGroupsDirty = true;
+    }
+    void buildGroup0();
+    void buildGroup1();
+    bool group0Dirty = true; // storage buffer slots or states changed
     bool flushDraw();
     bool wait(const wgpu::Future& future, const char* what);
 };

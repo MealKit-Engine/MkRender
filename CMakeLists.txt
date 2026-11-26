@@ -5,7 +5,7 @@
 # Built standalone it includes tests and the MkRender scene editor (tool/, Windows and Linux X11); added by another project with add_subdirectory, only the libraries.
 #   cmake -S . -B build && cmake --build build && ctest --test-dir build
 # Values the including side can set:
-#   MKRHI_BACKEND              DX12 (default), Vulkan or WebGPU (work in progress: Dawn, Linux X11; no compute, ImGui or GPU timers yet)
+#   MKRHI_BACKEND              DX12 (default), Vulkan or WebGPU (work in progress: Dawn, Linux X11)
 #   MKRHI_DAWN_DIR             WebGPU: Dawn's CMake package folder (lib64/cmake/Dawn; default: MealKit's download cache)
 #   MKRENDER_TINT              WebGPU: Tint (SPIR-V to WGSL; default: bin/tint next to that Dawn package)
 #   MKRHI_VULKAN_INCLUDE_DIRS  Vulkan headers, volk and VMA folders (default: this repo's third_party/; the loader is loaded at run time by volk)
@@ -25,7 +25,7 @@ set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan WebGPU)
 option(MKRENDER_OBJECT_LIBRARIES "Build OBJECT libraries instead of STATIC" OFF)
 option(MKRENDER_DEBUG_VIEWS "Build the editor-only view modes (DebugView::BaseColor and later: their shader variant and code); OFF for shipping builds" ON)
 option(MKRENDER_BUILD_TESTS "Build MkRender tests" ${PROJECT_IS_TOP_LEVEL})
-if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND PROJECT_IS_TOP_LEVEL AND NOT MKRHI_BACKEND STREQUAL "WebGPU")
+if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND PROJECT_IS_TOP_LEVEL)
     set(mkrender_tool_default ON)
 else()
     set(mkrender_tool_default OFF)
@@ -63,9 +63,7 @@ elseif(MKRHI_BACKEND STREQUAL "DX12")
     set(mkrhi_imgui_source src/mkrhi/dx12/Dx12ImGui.cpp)
 elseif(MKRHI_BACKEND STREQUAL "WebGPU")
     list(APPEND mkrhi_sources src/mkrhi/webgpu/Wgpu.h src/mkrhi/webgpu/WgpuDevice.cpp)
-    if(MKRHI_IMGUI_TARGET)
-        message(FATAL_ERROR "The WebGPU backend has no ImGui drawing yet (MKRHI_IMGUI_TARGET)")
-    endif()
+    set(mkrhi_imgui_source src/mkrhi/webgpu/WgpuImGui.cpp) # its own drawing (ImGui has no WebGPU backend in third_party)
     if(NOT MKRHI_DAWN_DIR)
         file(GLOB mkrhi_dawn_dirs "$ENV{HOME}/.local/share/MealKit/tools/dawn-*/x/Dawn-*/lib64/cmake/Dawn")
         list(SORT mkrhi_dawn_dirs)
@@ -175,7 +173,6 @@ endif()
 # Shaders: DXC turns shaders/*.hlsl into byte-array headers at build time, both DXIL and SPIR-V (a failure on either side fails the build).
 # This backend's output goes to <build>/shaders/<name>.h (included by the renderer), the other to shaders/other/ (checked only).
 # WebGPU: a third output, SPIR-V 1.3 with MKRHI_WEBGPU=1 (no descriptor arrays, shaders/Bindless.hlsli) turned into WGSL by Tint.
-# Compute shaders have no WGSL yet (the WebGPU backend has no compute).
 # MKRENDER_DXC: a DXC with SPIR-V support (the Windows SDK one has none). Default: dxc on PATH or MealKit's download cache.
 if(NOT MKRENDER_DXC)
     find_program(MKRENDER_DXC NAMES dxc HINTS "$ENV{LOCALAPPDATA}/MealKit/tools/dxc-v1.9.2609/bin/x64"
@@ -243,7 +240,7 @@ if(MKRENDER_DXC)
             COMMAND ${MKRENDER_DXC} -nologo -T ${profile} -E ${entry} -Vn ${name} -Fh ${spirv} ${MKRENDER_SPIRV_FLAGS} ${spirv_entry} ${defines} ${src}
             DEPENDS ${deps} COMMENT "DXC ${source} (${entry}, SPIR-V)" VERBATIM)
         set(headers ${dxil} ${spirv})
-        if(MKRHI_BACKEND STREQUAL "WebGPU" AND NOT profile MATCHES "^cs_")
+        if(MKRHI_BACKEND STREQUAL "WebGPU")
             set(wgpu_spv ${MKRENDER_SHADER_OUT}/webgpu/${name}.spv)
             set(wgsl ${MKRENDER_SHADER_OUT}/webgpu/${name}.wgsl)
             set(header ${MKRENDER_SHADER_OUT}/${name}.h)
@@ -290,6 +287,8 @@ if(MKRENDER_DXC)
     mkrender_shader(ComputeTest.hlsl CSFill cs_6_6 g_ComputeFillCS)
     mkrender_shader(ComputeTest.hlsl CSAdd cs_6_6 g_ComputeAddCS)
     mkrender_shader(ComputeTest.hlsl CSCopy cs_6_6 g_ComputeCopyCS)
+    mkrender_shader(ComputeTest.hlsl CSRead cs_6_6 g_ComputeReadCS)
+    mkrender_shader(ComputeTest.hlsl CSSample cs_6_6 g_ComputeSampleCS)
 
     # MKRENDER_USER_CONFIG / MKRENDER_USER_CONFIG_INCLUDE_DIRS: the host's types (include/mkrender/Config.h)
     add_library(mkrender ${mkrender_lib_type}
@@ -353,8 +352,7 @@ if(MKRENDER_BUILD_TESTS)
         add_test(NAME mkrender_golden COMMAND mkrender_golden WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     endif()
     # RHI compute (tests/ComputeTest.cpp): compute pipelines, storage buffers/textures, barriers on a hidden window. Skips without a GPU.
-    # Not on WebGPU (no compute there yet)
-    if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND TARGET mkrender AND NOT MKRHI_BACKEND STREQUAL "WebGPU")
+    if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND TARGET mkrender)
         add_executable(mkrender_compute tests/ComputeTest.cpp)
         target_link_libraries(mkrender_compute PRIVATE mkrhi)
         add_dependencies(mkrender_compute mkrender) # the compute test shader headers are built with it

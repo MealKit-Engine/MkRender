@@ -4,6 +4,7 @@
 #include "mkrhi/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -382,6 +383,10 @@ struct Renderer::Impl {
     u64 materialOffset = 0; // ring offset of this frame's material table (shared by main view and offscreen)
     // Writes to the upload ring and puts the position in offset. withShadows: main view (decides and fills sun shadow cascades)
     void writeFrameConstants(const FrameParams& p, u64* offset, bool withShadows);
+    // Textures the scene shaders read that may not be pooled (mkrhi useTextures: WebGPU binds only those): shadow map, sky and
+    // reflection cubes, toon ramp. lastFrameTextures is the latest writeFrameConstants call's, sceneTextures the main view's
+    std::array<u32, 4> lastFrameTextures{kNoTexture, kNoTexture, kNoTexture, kNoTexture};
+    std::array<u32, 4> sceneTextures{kNoTexture, kNoTexture, kNoTexture, kNoTexture};
     bool vsync = true;
     bool inFrame = false;
     bool uploadOverflowWarned = false;
@@ -866,6 +871,7 @@ bool Renderer::beginFrame(const FrameParams& p) {
     else m->warnOverflow(materialBytes);
     m->shadowCascades = 0;
     m->writeFrameConstants(p, &m->frameOffset, true); // also decides shadow cascades (shadowCascades)
+    m->sceneTextures = m->lastFrameTextures;
     if (m->shadowCascades) { // per cascade, frame constants with only viewProj changed (vertex shader of the shadow pass)
         FrameParams sp = p;
         sp.lights = nullptr;
@@ -907,6 +913,7 @@ void Renderer::Impl::ensureScene() {
     mkrhi::CommandList& cmd = device.cmd();
     beginPass(GpuPass::Opaque);
     cmd.beginTarget(mainChain.scene, sceneClear, 0.0f); // HDR scene target, reversed-Z: far is 0
+    cmd.useTextures(sceneTextures.data(), static_cast<u32>(sceneTextures.size()));
     cmd.setViewport(sceneViewport[0] * sceneScale, sceneViewport[1] * sceneScale, std::max(1.0f, sceneViewport[2] * sceneScale),
                     std::max(1.0f, sceneViewport[3] * sceneScale));
     if (sceneSky) drawSky(sceneParams);
@@ -993,6 +1000,7 @@ void Renderer::drawShadows(const DrawList& list) {
     m->beginPass(GpuPass::Shadow);
     const f32 none[4] = {};
     cmd.beginTarget(m->shadowTarget, none, 0.0f);
+    cmd.useTextures(nullptr, 0); // alpha tests read pooled material textures only
     cmd.setPipeline(m->shadowPipeline);
     const f32 size = static_cast<f32>(m->shadowTargetSize);
     for (u32 c = 0; c < m->shadowCascades; ++c) {
@@ -1138,6 +1146,8 @@ void Renderer::Impl::writeFrameConstants(const FrameParams& p, u64* offset, bool
     if (withShadows) computeCascades(p, fc);
     fc.materials[0] = static_cast<u32>(materialOffset);
     fc.materials[1] = static_cast<u32>(materials.size());
+    lastFrameTextures = {withShadows && shadowCascades ? fc.shadow[0] : kNoTexture, fc.env[3] ? fc.env[0] : kNoTexture,
+                         fc.env[3] ? fc.env[1] : kNoTexture, fc.style[0]};
     if (u8* cpu = device.allocUpload(sizeof(fc), kRingAlignment, offset)) std::memcpy(cpu, &fc, sizeof(fc));
     else warnOverflow(sizeof(fc));
 }
@@ -1353,6 +1363,7 @@ void Renderer::Impl::runPost(PostChain& chain, const PostParams& post, const f32
             cmd.setViewport(0.0f, 0.0f, dstW, dstH);
             cmd.setPipeline(bloomDown);
             push.source = i ? device.textureIndex(device.renderTargetTexture(chain.bloom[i - 1])) : sceneTexture;
+            cmd.useTextures({push.source});
             push.first = i == 0;
             push.texel[0] = 1.0f / srcW, push.texel[1] = 1.0f / srcH;
             push.scale[0] = 1.0f / dstW, push.scale[1] = 1.0f / dstH;
@@ -1367,6 +1378,7 @@ void Renderer::Impl::runPost(PostChain& chain, const PostParams& post, const f32
             cmd.setViewport(0.0f, 0.0f, dstW, dstH);
             cmd.setPipeline(bloomUp);
             push.source = device.textureIndex(device.renderTargetTexture(chain.bloom[i + 1]));
+            cmd.useTextures({push.source});
             push.texel[0] = 1.0f / static_cast<f32>(chain.bloomSize[i + 1][0]), push.texel[1] = 1.0f / static_cast<f32>(chain.bloomSize[i + 1][1]);
             push.scale[0] = 1.0f / dstW, push.scale[1] = 1.0f / dstH;
             cmd.pushConstants(&push, sizeof(push));
@@ -1385,6 +1397,7 @@ void Renderer::Impl::runPost(PostChain& chain, const PostParams& post, const f32
     }
     cmd.setPipeline(uber);
     push.source = sceneTexture;
+    cmd.useTextures({sceneTexture, postTextures[0], postTextures[1]});
     push.texel[0] = 1.0f / w, push.texel[1] = 1.0f / h;
     push.scale[0] = 1.0f / w, push.scale[1] = 1.0f / h;
     cmd.pushConstants(&push, sizeof(push));
@@ -1441,6 +1454,7 @@ void Renderer::drawToTarget(mkrhi::RenderTarget target, const FrameParams& p, co
     const Vec3 sky = p.fogColor;
     const f32 clear[4] = {sky.x, sky.y, sky.z, 1.0f};
     cmd.beginTarget(chain.scene, clear, 0.0f);
+    cmd.useTextures(m->lastFrameTextures.data(), static_cast<u32>(m->lastFrameTextures.size()));
     const f32 rect[4] = {0.0f, 0.0f, static_cast<f32>(chain.width), static_cast<f32>(chain.height)};
     cmd.setViewport(rect[0], rect[1], rect[2], rect[3]);
     m->drawSky(p);
@@ -1657,6 +1671,7 @@ void Renderer::drawUi(const UiQuad* quads, u32 count) {
     push.quadOffset = static_cast<u32>(offset);
     push.glyphAtlas = m->device.textureIndex(m->uiAtlas[0]);
     push.imageAtlas = m->device.textureIndex(m->uiAtlas[1]);
+    cmd.useTextures({push.glyphAtlas, push.imageAtlas});
     cmd.pushConstants(&push, sizeof(push));
     cmd.draw(6, count);
     m->stats.drawCalls += 1;

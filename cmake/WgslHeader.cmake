@@ -5,6 +5,10 @@
 # extra features, and shaders only store to them (shaders/Compute.hlsli mkRwStore2D). The edited WGSL is written next to IN.
 file(READ ${IN} wgsl)
 string(REGEX REPLACE "texture_storage_2d<([a-z0-9]+), read_write>" "texture_storage_2d<\\1, write>" wgsl "${wgsl}")
+# Immediates (push constants) are a WGSL language feature in browsers (Chrome 150+): declared so a browser without it fails clearly
+if(wgsl MATCHES "var<immediate>")
+    string(PREPEND wgsl "requires immediate_address_space;\n")
+endif()
 file(WRITE ${IN}.final "${wgsl}")
 file(READ ${IN}.final hex HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," bytes "${hex}")

@@ -25,6 +25,7 @@ struct Device::Impl::ImGuiState {
 namespace {
 
 constexpr char kShader[] = R"(
+requires immediate_address_space;
 struct Transform { scale : vec2f, translate : vec2f }
 var<immediate> transform : Transform;
 struct Varyings {

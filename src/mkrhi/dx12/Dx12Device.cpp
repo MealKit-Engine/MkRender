@@ -1313,6 +1313,8 @@ void CommandList::draw(u32 vertexCount, u32 instanceCount) {
     m_device->impl()->list->DrawInstanced(vertexCount, instanceCount, 0, 0);
 }
 
+void CommandList::useTextures(const u32*, u32) {} // every texture is in the bindless arrays
+
 void CommandList::textureBarrier(Texture texture, TextureState before, TextureState after) {
     Device::Impl* m = m_device->impl();
     const D3D12_RESOURCE_BARRIER b = transition(m->textures[texture.id - 1].resource.Get(), toD3d(before), toD3d(after));

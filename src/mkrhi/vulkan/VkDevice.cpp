@@ -1678,6 +1678,8 @@ void CommandList::draw(u32 vertexCount, u32 instanceCount) {
     vkCmdDraw(m_device->impl()->current(), vertexCount, instanceCount, 0, 0);
 }
 
+void CommandList::useTextures(const u32*, u32) {} // every texture is in the bindless arrays
+
 void CommandList::textureBarrier(Texture texture, TextureState before, TextureState after) {
     Device::Impl* m = m_device->impl();
     m->endRendering(); // barriers/copies happen outside the render target

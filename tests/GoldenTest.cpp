@@ -24,6 +24,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
 #else
 #include <X11/Xlib.h>
 #endif
@@ -395,6 +397,19 @@ void pumpMessages(NativeWindow) {
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
 }
+#elif defined(__EMSCRIPTEN__)
+// Browser: the page's canvas at the shot size (mkrender_golden.html); each frame shows in it
+struct NativeWindow {
+    mkrhi::WebCanvas handle;
+    explicit operator bool() const { return true; }
+};
+NativeWindow makeHiddenWindow() {
+    emscripten_set_canvas_element_size("#canvas", kWidth, kHeight);
+    return {};
+}
+void* windowHandle(NativeWindow& window) { return &window.handle; }
+void pumpMessages(NativeWindow&) {}
+void destroyWindow(NativeWindow&) {}
 #else
 // Linux (X11): a window that is never mapped; the Vulkan swap chain takes the surface's size, the window's size
 struct NativeWindow {

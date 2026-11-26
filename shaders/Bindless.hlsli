@@ -8,12 +8,13 @@
 
 #if MKRHI_WEBGPU
 // WebGPU: SPIR-V for Tint (SPIR-V 1.3, no SPV_EXT_descriptor_indexing). Group 0: upload ring + samplers.
-// Group 0 also holds the storage buffers for reading (bindings 5..8, mkBufferLoad: index 1 + slot; 0 = the ring).
+// Group 0 also holds the storage buffers for reading (bindings 5..7, mkBufferLoad: index 1 + slot; 0 = the ring).
 // Group 1: texture array pools, one per format and size class (pool = format * 2 + class, class 0 = 512, 1 = 2048; mkrhi/webgpu/Wgpu.h
 // kPools), then the Rgb9e5 cube array pools 10 (512) and 11 (2048). Index: pool bits 23..19, layer 18..11, mip bias 10..8 (the pool
 // mip the texture's mip 0 sits in), last mip 7..0.
-// Group 2: direct slots, separately bound textures (pool 31, bits 18..11 = slot): 24 2D (bindings 0..23), 4 cubes (24..27) and
-// 4 depth textures (28..31, shadow maps read with a comparison sampler), Wgpu.h kDirectTextures/kDirectCubes/kDirectDepths.
+// Group 2: direct textures (pool 31, bits 18..11 = direct id): the few the host named with CommandList::useTextures for these draws,
+// two 2D (bindings 0, 1), a cube (2) and a depth texture (3, shadow maps read with a comparison sampler), and their direct ids
+// (binding 4, g_directIds: 2D 0, 2D 1, cube, depth). 12 pool + 4 bindings = the 16 sampled textures browsers allow per stage.
 [[vk::binding(0, 1)]] Texture2DArray g_pool0;
 [[vk::binding(1, 1)]] Texture2DArray g_pool1;
 [[vk::binding(2, 1)]] Texture2DArray g_pool2;
@@ -29,43 +30,15 @@
 [[vk::binding(5, 0)]] ByteAddressBuffer g_storage0;
 [[vk::binding(6, 0)]] ByteAddressBuffer g_storage1;
 [[vk::binding(7, 0)]] ByteAddressBuffer g_storage2;
-[[vk::binding(8, 0)]] ByteAddressBuffer g_storage3;
 [[vk::binding(0, 0)]] ByteAddressBuffer g_ring;
 [[vk::binding(2, 0)]] SamplerState g_linearClamp;
 [[vk::binding(3, 0)]] SamplerState g_linearWrap;
 [[vk::binding(4, 0)]] SamplerComparisonState g_shadowCompare; // GreaterEqual: 1 where the reference is at or in front of the texel
 [[vk::binding(0, 2)]] Texture2D g_direct0;
 [[vk::binding(1, 2)]] Texture2D g_direct1;
-[[vk::binding(2, 2)]] Texture2D g_direct2;
-[[vk::binding(3, 2)]] Texture2D g_direct3;
-[[vk::binding(4, 2)]] Texture2D g_direct4;
-[[vk::binding(5, 2)]] Texture2D g_direct5;
-[[vk::binding(6, 2)]] Texture2D g_direct6;
-[[vk::binding(7, 2)]] Texture2D g_direct7;
-[[vk::binding(8, 2)]] Texture2D g_direct8;
-[[vk::binding(9, 2)]] Texture2D g_direct9;
-[[vk::binding(10, 2)]] Texture2D g_direct10;
-[[vk::binding(11, 2)]] Texture2D g_direct11;
-[[vk::binding(12, 2)]] Texture2D g_direct12;
-[[vk::binding(13, 2)]] Texture2D g_direct13;
-[[vk::binding(14, 2)]] Texture2D g_direct14;
-[[vk::binding(15, 2)]] Texture2D g_direct15;
-[[vk::binding(16, 2)]] Texture2D g_direct16;
-[[vk::binding(17, 2)]] Texture2D g_direct17;
-[[vk::binding(18, 2)]] Texture2D g_direct18;
-[[vk::binding(19, 2)]] Texture2D g_direct19;
-[[vk::binding(20, 2)]] Texture2D g_direct20;
-[[vk::binding(21, 2)]] Texture2D g_direct21;
-[[vk::binding(22, 2)]] Texture2D g_direct22;
-[[vk::binding(23, 2)]] Texture2D g_direct23;
-[[vk::binding(24, 2)]] TextureCube g_directCube0;
-[[vk::binding(25, 2)]] TextureCube g_directCube1;
-[[vk::binding(26, 2)]] TextureCube g_directCube2;
-[[vk::binding(27, 2)]] TextureCube g_directCube3;
-[[vk::binding(28, 2)]] Texture2D g_directDepth0; // GatherCmp makes these texture_depth_2d in WGSL
-[[vk::binding(29, 2)]] Texture2D g_directDepth1; // GatherCmp makes these texture_depth_2d in WGSL
-[[vk::binding(30, 2)]] Texture2D g_directDepth2; // GatherCmp makes these texture_depth_2d in WGSL
-[[vk::binding(31, 2)]] Texture2D g_directDepth3; // GatherCmp makes these texture_depth_2d in WGSL
+[[vk::binding(2, 2)]] TextureCube g_directCube;
+[[vk::binding(3, 2)]] Texture2D g_directDepth; // GatherCmp makes this texture_depth_2d in WGSL
+[[vk::binding(4, 2)]] cbuffer MkDirectIds { uint4 g_directIds; };
 #else
 [[vk::binding(0, 0)]] ByteAddressBuffer g_buffers[] : register(t0, space1);
 [[vk::binding(1, 0)]] Texture2D g_textures[] : register(t0, space2);
@@ -87,8 +60,7 @@ uint mkBufferLoad(uint index, uint offset)
     case 0: return g_ring.Load(offset);
     case 1: return g_storage0.Load(offset);
     case 2: return g_storage1.Load(offset);
-    case 3: return g_storage2.Load(offset);
-    default: return g_storage3.Load(offset);
+    default: return g_storage2.Load(offset);
     }
 }
 uint4 mkBufferLoad4(uint index, uint offset)
@@ -97,14 +69,13 @@ uint4 mkBufferLoad4(uint index, uint offset)
     case 0: return g_ring.Load4(offset);
     case 1: return g_storage0.Load4(offset);
     case 2: return g_storage1.Load4(offset);
-    case 3: return g_storage2.Load4(offset);
-    default: return g_storage3.Load4(offset);
+    default: return g_storage2.Load4(offset);
     }
 }
 
 uint mkPool(uint index) { return (index >> 19) & 31u; }
 bool mkIsDirect(uint index) { return mkPool(index) == 31u; }
-uint mkDirectSlot(uint index) { return (index >> 11) & 0xFFu; }
+uint mkDirectId(uint index) { return (index >> 11) & 0xFFu; }
 float mkPoolLayer(uint index) { return float((index >> 11) & 0xFFu); }
 uint mkMipBias(uint index) { return (index >> 8) & 7u; }
 uint mkLastMip(uint index) { return index & 0xFFu; }
@@ -123,33 +94,11 @@ uint2 mkPoolSize(uint index) { return ((mkPool(index) & 1u) ? 2048u : 512u).xx >
     case 7: { Texture2DArray t = g_pool7; body; } \
     case 8: { Texture2DArray t = g_pool8; body; } \
     default: { Texture2DArray t = g_pool9; body; } }
-// Runs `body` with `t` bound to the direct slot of `index` (each case is a static choice, which SPIR-V legalization needs)
+// Runs `body` with `t` bound to the direct 2D texture of `index` (each branch is a static choice, which SPIR-V legalization needs).
+// Not one of the two bound (useTextures): reads g_direct1
 #define MK_DIRECT_2D(index, body) \
-    switch (mkDirectSlot(index)) { \
-    case 0: { Texture2D t = g_direct0; body; } \
-    case 1: { Texture2D t = g_direct1; body; } \
-    case 2: { Texture2D t = g_direct2; body; } \
-    case 3: { Texture2D t = g_direct3; body; } \
-    case 4: { Texture2D t = g_direct4; body; } \
-    case 5: { Texture2D t = g_direct5; body; } \
-    case 6: { Texture2D t = g_direct6; body; } \
-    case 7: { Texture2D t = g_direct7; body; } \
-    case 8: { Texture2D t = g_direct8; body; } \
-    case 9: { Texture2D t = g_direct9; body; } \
-    case 10: { Texture2D t = g_direct10; body; } \
-    case 11: { Texture2D t = g_direct11; body; } \
-    case 12: { Texture2D t = g_direct12; body; } \
-    case 13: { Texture2D t = g_direct13; body; } \
-    case 14: { Texture2D t = g_direct14; body; } \
-    case 15: { Texture2D t = g_direct15; body; } \
-    case 16: { Texture2D t = g_direct16; body; } \
-    case 17: { Texture2D t = g_direct17; body; } \
-    case 18: { Texture2D t = g_direct18; body; } \
-    case 19: { Texture2D t = g_direct19; body; } \
-    case 20: { Texture2D t = g_direct20; body; } \
-    case 21: { Texture2D t = g_direct21; body; } \
-    case 22: { Texture2D t = g_direct22; body; } \
-    default: { Texture2D t = g_direct23; body; } }
+    if (mkDirectId(index) == g_directIds.x) { Texture2D t = g_direct0; body; } \
+    else { Texture2D t = g_direct1; body; }
 
 uint2 mkTextureSize2D(uint index)
 {
@@ -215,23 +164,13 @@ float4 mkSampleCubeLevel(uint index, SamplerState s, float3 dir, float lod)
         if (mkPool(index) == 10u) return g_cubePool0.SampleLevel(s, c, level);
         return g_cubePool1.SampleLevel(s, c, level);
     }
-    switch (mkDirectSlot(index)) {
-    case 0: return g_directCube0.SampleLevel(s, dir, lod);
-    case 1: return g_directCube1.SampleLevel(s, dir, lod);
-    case 2: return g_directCube2.SampleLevel(s, dir, lod);
-    default: return g_directCube3.SampleLevel(s, dir, lod);
-    }
+    return g_directCube.SampleLevel(s, dir, lod);
 }
 // Shadow map PCF taps: per texel of the 2×2 footprint at uv, 1 if receiver >= the stored depth (reversed-Z: lit), 0 if not.
 // Gather order (0,1) (1,1) (1,0) (0,0). WebGPU: the comparison happens in the sampler (depth textures can't use filtering samplers)
 float4 mkShadowGather(uint index, float2 uv, float receiver)
 {
-    switch (mkDirectSlot(index)) {
-    case 0: return g_directDepth0.GatherCmpRed(g_shadowCompare, uv, receiver);
-    case 1: return g_directDepth1.GatherCmpRed(g_shadowCompare, uv, receiver);
-    case 2: return g_directDepth2.GatherCmpRed(g_shadowCompare, uv, receiver);
-    default: return g_directDepth3.GatherCmpRed(g_shadowCompare, uv, receiver);
-    }
+    return g_directDepth.GatherCmpRed(g_shadowCompare, uv, receiver);
 }
 #else
 // DX12/Vulkan: the plain array access (indices may be non-uniform: material textures differ per pixel)

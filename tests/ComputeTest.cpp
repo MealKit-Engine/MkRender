@@ -19,6 +19,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
 #else
 #include <X11/Xlib.h>
 #endif
@@ -79,6 +81,18 @@ NativeWindow makeHiddenWindow() {
     return w;
 }
 void destroyWindow(NativeWindow& w) { if (w.hwnd) DestroyWindow(w.hwnd); }
+#elif defined(__EMSCRIPTEN__)
+// Browser: the page's canvas (mkrender_compute.html)
+struct NativeWindow {
+    WebCanvas native;
+    explicit operator bool() const { return true; }
+    void* handle() { return &native; }
+};
+NativeWindow makeHiddenWindow() {
+    emscripten_set_canvas_element_size("#canvas", kWidth, kHeight);
+    return {};
+}
+void destroyWindow(NativeWindow&) {}
 #else
 struct NativeWindow {
     Display* display = nullptr;
@@ -181,6 +195,7 @@ int main() {
         cmd.dispatch((kCount + 63) / 64, 1, 1);
         cmd.uavBarrier();
         cmd.textureBarrier(texture, TextureState::UnorderedAccess, TextureState::ShaderRead);
+        cmd.useTextures({device.textureIndex(texture), device.textureIndex(mipTexture), device.textureIndex(cube)}); // WebGPU group 2
         cmd.setPipeline(copy); // reads the texture through g_textures[]
         cmd.pushConstants(&push, sizeof(push));
         cmd.dispatch(1, 1, 1);

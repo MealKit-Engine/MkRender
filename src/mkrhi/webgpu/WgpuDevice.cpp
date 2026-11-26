@@ -8,6 +8,18 @@
 #include <string>
 #include <string_view>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+// Browser: the canvas shows a frame when control goes back to the event loop. JSPI suspends the frame loop until the next
+// animation frame (the host's loop stays a plain loop). Hidden tabs get no animation frames: a 100 ms timer goes on instead
+EM_ASYNC_JS(void, mkrhiWaitAnimationFrame, (), {
+    await new Promise((resolve) => {
+        requestAnimationFrame(resolve);
+        setTimeout(resolve, 100);
+    });
+});
+#endif
+
 namespace mkrhi {
 namespace {
 
@@ -41,8 +53,15 @@ wgpu::VertexFormat toWgpu(VertexFormat f) {
     }
 }
 
-// Index the shaders decode (Bindless.hlsli mkDirectSlot): pool 31 in bits 23..19, the slot in bits 18..11
-u32 directIndex(u32 slot) { return (kDirectPool << 19) | (slot << 11); }
+// Index the shaders decode (Bindless.hlsli mkDirectId): pool 31 in bits 23..19, the direct id in bits 18..11
+u32 directIndex(u32 id) { return (kDirectPool << 19) | (id << 11); }
+
+// Storage texture format of a storage slot (kStorageFirst order)
+u32 storageFormatOfSlot(u32 slot) {
+    u32 f = 0;
+    while (f + 1 < kStorageFormats && slot >= kStorageFirst[f + 1]) ++f;
+    return f;
+}
 
 wgpu::Instance createInstance() {
     static const wgpu::InstanceFeatureName kTimedWaitAny = wgpu::InstanceFeatureName::TimedWaitAny;
@@ -78,7 +97,7 @@ const char* backendText(wgpu::BackendType t) {
 }
 
 // Features and limits the renderer needs (the min spec); what's missing as a sentence
-constexpr u32 kSampledTexturesNeeded = kAllPools + kDirectBindings;
+constexpr u32 kSampledTexturesNeeded = kAllPools + kBoundTextures;
 constexpr u32 kStorageBuffersNeeded = 1 + 2 * kStorageBuffers; // ring + read slots + write slots (compute)
 std::string missingFeatures(const wgpu::Adapter& adapter) {
     std::string missing;
@@ -96,14 +115,19 @@ std::string missingFeatures(const wgpu::Adapter& adapter) {
          (std::to_string(kSampledTexturesNeeded) + " sampled textures per shader stage").c_str());
     need(limits.maxStorageBuffersPerShaderStage >= kStorageBuffersNeeded,
          (std::to_string(kStorageBuffersNeeded) + " storage buffers per shader stage").c_str());
-    need(limits.maxStorageTexturesPerShaderStage >= kStorageTextures, "6 storage textures per shader stage");
+    need(limits.maxStorageTexturesPerShaderStage >= kStorageTextures,
+         (std::to_string(kStorageTextures) + " storage textures per shader stage").c_str());
     return missing;
 }
 
 void describeGpu(const wgpu::Adapter& adapter, GpuInfo& info) {
     wgpu::AdapterInfo a;
     adapter.GetInfo(&a);
+#ifdef __EMSCRIPTEN__
+    info.api = "WebGPU (browser)";
+#else
     info.api = std::string("WebGPU (Dawn, ") + backendText(a.backendType) + ")";
+#endif
     info.adapter = text(a.device);
     info.driverVersion = text(a.description);
     info.vendorId = a.vendorID;
@@ -144,6 +168,12 @@ const wgpu::PassTimestampWrites* Device::Impl::nextPassTimestamps() {
         f.pendingBegins = 0;
         passTimestamps.beginningOfPassWriteIndex = base + f.queries++;
     }
+#ifdef __EMSCRIPTEN__
+    // emdawnwebgpu passes the "undefined" index (0xFFFFFFFF) on to the browser, which rejects it: write an unused start query instead
+    else {
+        passTimestamps.beginningOfPassWriteIndex = base + f.queries++;
+    }
+#endif
     f.passEnd = f.queries++;
     passTimestamps.endOfPassWriteIndex = base + f.passEnd;
     return &passTimestamps;
@@ -276,36 +306,53 @@ void Device::Impl::buildGroup1() {
     group1 = device.CreateBindGroup(&desc);
 }
 
-// Group 2 without `exclude` (the pass's attachment) and, for dispatches, without the storage textures in UnorderedAccess (bound for
-// writing in group 3: WebGPU doesn't allow both uses in one dispatch)
-wgpu::BindGroup Device::Impl::buildGroup2(u32 exclude, bool skipUnordered) {
+// Group 2: the textures useTextures named, without `exclude` (the pass's attachment, which a pass can't also read) and, for
+// dispatches, without the storage textures in UnorderedAccess (bound for writing in group 3: WebGPU doesn't allow both uses in one
+// dispatch). Binding 4 holds their direct ids (g_directIds: 2D 0, 2D 1, cube, depth; ~0u = none). Built once per combination
+wgpu::BindGroup Device::Impl::group2(u32 exclude, bool skipUnordered) {
+    Group2Key key;
+    key.bound = bound;
+    key.exclude = exclude;
+    key.skipUnordered = skipUnordered;
+    for (const Group2Entry& e : group2Cache)
+        if (e.key == key) return e.group;
+    u32 ids[4] = {~0u, ~0u, ~0u, ~0u};
     wgpu::BindGroupEntry entries[kDirectBindings];
-    for (u32 i = 0; i < kDirectBindings; ++i) {
-        const bool cube = i >= kDirectTextures && i < kDirectTextures + kDirectCubes, depth = i >= kDirectTextures + kDirectCubes;
-        const u32 id = depth ? depthSlots[i - kDirectTextures - kDirectCubes] : cube ? cubeSlots[i - kDirectTextures] : slots[i];
-        const bool bound = id && id != exclude && !(skipUnordered && textures[id - 1].unordered);
+    for (u32 i = 0; i < kBoundTextures; ++i) {
+        const bool cube = i == kBound2D, depth = i == kBound2D + kBoundCubes;
+        const u32 id = bound[i];
+        const bool use = id && id != exclude && !(skipUnordered && textures[id - 1].unordered);
+        if (use) ids[i] = textures[id - 1].slot;
         entries[i].binding = i;
-        entries[i].textureView = bound ? textures[id - 1].view : depth ? dummyDepthView : cube ? dummyCubeView : dummy2DView;
+        entries[i].textureView = use ? textures[id - 1].view : depth ? dummyDepthView : cube ? dummyCubeView : dummy2DView;
     }
+    wgpu::BufferDescriptor bd;
+    bd.size = sizeof(ids);
+    bd.usage = wgpu::BufferUsage::Uniform;
+    bd.mappedAtCreation = true;
+    Group2Entry e;
+    e.key = key;
+    e.ids = device.CreateBuffer(&bd);
+    std::memcpy(e.ids.GetMappedRange(), ids, sizeof(ids));
+    e.ids.Unmap();
+    entries[kBoundTextures].binding = kBoundTextures;
+    entries[kBoundTextures].buffer = e.ids;
     wgpu::BindGroupDescriptor desc;
     desc.layout = layout2;
     desc.entryCount = kDirectBindings;
     desc.entries = entries;
-    return device.CreateBindGroup(&desc);
+    e.group = device.CreateBindGroup(&desc);
+    if (group2Cache.size() >= 256) { // groups already set in an open pass stay alive in the pass
+        group2Cache.clear();
+        applied.group2 = nullptr; // a new group may get a freed one's address
+    }
+    group2Cache.push_back(e);
+    return e.group;
 }
 
-wgpu::BindGroup Device::Impl::group2(u32 exclude) {
-    for (const auto& [key, group] : group2Cache)
-        if (key == exclude) return group;
-    wgpu::BindGroup group = buildGroup2(exclude, false);
-    group2Cache.emplace_back(exclude, group);
-    return group;
-}
-
-// Dispatch groups 2 and 3, rebuilt after a slot or a storage texture's state changed
+// Dispatch group 3, rebuilt after a slot or a storage texture's state changed
 void Device::Impl::buildComputeGroups() {
     if (!computeGroupsDirty) return;
-    computeGroup2 = buildGroup2(0, true);
     wgpu::BindGroupEntry entries[kStorageBindings];
     for (u32 i = 0; i < kStorageBuffers; ++i) {
         const u32 id = storageBufferSlots[i];
@@ -341,7 +388,7 @@ bool Device::Impl::flushDraw() {
         pass.SetBindGroup(1, group1);
         applied.group1 = group1.Get();
     }
-    const wgpu::BindGroup g2 = group2(passExclude);
+    const wgpu::BindGroup g2 = group2(passExclude, false);
     if (applied.group2 != g2.Get()) {
         pass.SetBindGroup(2, g2);
         applied.group2 = g2.Get();
@@ -390,7 +437,14 @@ bool Device::init(const DeviceDesc& desc) {
 
     m->instance = createInstance();
     if (!m->instance) return fail("WebGPU instance creation failed");
-#if defined(__linux__)
+#if defined(__EMSCRIPTEN__)
+    const auto* canvas = static_cast<const WebCanvas*>(desc.window);
+    wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector source;
+    source.selector = canvas && canvas->selector ? canvas->selector : "#canvas";
+    wgpu::SurfaceDescriptor surfaceDesc;
+    surfaceDesc.nextInChain = &source;
+    m->surface = m->instance.CreateSurface(&surfaceDesc);
+#elif defined(__linux__)
     const auto* xlib = static_cast<const XlibWindow*>(desc.window);
     if (!xlib || !xlib->display) return fail("WebGPU needs an X11 window (XlibWindow)");
     wgpu::SurfaceSourceXlibWindow source;
@@ -427,6 +481,7 @@ bool Device::init(const DeviceDesc& desc) {
     limits.maxStorageTexturesPerShaderStage = kStorageTextures;
     limits.maxStorageBuffersPerShaderStage = kStorageBuffersNeeded;
     wgpu::DeviceDescriptor deviceDesc;
+#ifndef __EMSCRIPTEN__ // browsers keep their own shader cache and quantize timestamps; Dawn's descriptors don't exist there
     // Pipeline cache: Dawn asks for and hands over blobs by key; the isolation key keeps other GPUs/drivers apart
     WGPUDawnCacheDeviceDescriptor cacheDesc = WGPU_DAWN_CACHE_DEVICE_DESCRIPTOR_INIT;
     const std::string isolation = gpu.adapter + "|" + gpu.driverVersion;
@@ -459,6 +514,7 @@ bool Device::init(const DeviceDesc& desc) {
     toggles.disabledToggles = kDisabledToggles;
     if (!desc.pipelineCache.empty()) toggles.nextInChain = reinterpret_cast<const wgpu::ChainedStruct*>(&cacheDesc);
     deviceDesc.nextInChain = &toggles;
+#endif
     deviceDesc.requiredFeatureCount = features.size();
     deviceDesc.requiredFeatures = features.data();
     deviceDesc.requiredLimits = &limits;
@@ -488,7 +544,11 @@ bool Device::init(const DeviceDesc& desc) {
             if (caps.formats[i] == want) m->swapFormat = want;
     if (m->swapFormat == wgpu::TextureFormat::Undefined) return fail("No 8-bit RGBA surface format on this GPU");
     m->swapBgra = m->swapFormat == wgpu::TextureFormat::BGRA8Unorm;
+#ifdef __EMSCRIPTEN__
+    m->swapCopySrc = true; // a canvas takes any usage; emdawnwebgpu leaves caps.usages empty
+#else
     m->swapCopySrc = (caps.usages & wgpu::TextureUsage::CopySrc) != wgpu::TextureUsage::None;
+#endif
     for (size_t i = 0; i < caps.presentModeCount; ++i) {
         m->immediateSupported |= caps.presentModes[i] == wgpu::PresentMode::Immediate;
         m->mailboxSupported |= caps.presentModes[i] == wgpu::PresentMode::Mailbox;
@@ -524,7 +584,7 @@ bool Device::init(const DeviceDesc& desc) {
     e0[3].binding = 4;
     e0[3].visibility = stages;
     e0[3].sampler.type = wgpu::SamplerBindingType::Comparison;
-    for (u32 i = 4; i < kGroup0Bindings; ++i) { // storage buffers for reading (bindings 5..8)
+    for (u32 i = 4; i < kGroup0Bindings; ++i) { // storage buffers for reading (bindings 5..7)
         e0[i].binding = i + 1;
         e0[i].visibility = stages;
         e0[i].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
@@ -544,13 +604,16 @@ bool Device::init(const DeviceDesc& desc) {
     ld.entries = e1;
     m->layout1 = m->device.CreateBindGroupLayout(&ld);
     wgpu::BindGroupLayoutEntry e2[kDirectBindings];
-    for (u32 i = 0; i < kDirectBindings; ++i) {
-        const bool cube = i >= kDirectTextures && i < kDirectTextures + kDirectCubes, depth = i >= kDirectTextures + kDirectCubes;
+    for (u32 i = 0; i < kBoundTextures; ++i) {
+        const bool cube = i == kBound2D, depth = i == kBound2D + kBoundCubes;
         e2[i].binding = i;
         e2[i].visibility = stages;
         e2[i].texture.sampleType = depth ? wgpu::TextureSampleType::Depth : wgpu::TextureSampleType::Float;
         e2[i].texture.viewDimension = cube ? wgpu::TextureViewDimension::Cube : wgpu::TextureViewDimension::e2D;
     }
+    e2[kBoundTextures].binding = kBoundTextures;
+    e2[kBoundTextures].visibility = stages;
+    e2[kBoundTextures].buffer.type = wgpu::BufferBindingType::Uniform;
     ld.entryCount = kDirectBindings;
     ld.entries = e2;
     m->layout2 = m->device.CreateBindGroupLayout(&ld);
@@ -571,7 +634,7 @@ bool Device::init(const DeviceDesc& desc) {
             e3[i].buffer.type = wgpu::BufferBindingType::Storage;
         } else {
             e3[i].storageTexture.access = wgpu::StorageTextureAccess::WriteOnly;
-            e3[i].storageTexture.format = kStorageFormatList[(i - kStorageBuffers) / kStorageTexturesPerFormat];
+            e3[i].storageTexture.format = kStorageFormatList[storageFormatOfSlot(i - kStorageBuffers)];
             e3[i].storageTexture.viewDimension = wgpu::TextureViewDimension::e2D;
         }
     }
@@ -622,7 +685,7 @@ bool Device::init(const DeviceDesc& desc) {
     m->buildGroup0();
     td.usage = wgpu::TextureUsage::StorageBinding;
     for (u32 i = 0; i < kStorageTextures; ++i) {
-        td.format = kStorageFormatList[i / kStorageTexturesPerFormat];
+        td.format = kStorageFormatList[storageFormatOfSlot(i)];
         m->dummyStorageViews[i] = m->device.CreateTexture(&td).CreateView();
     }
     if (m->timestamps) {
@@ -758,10 +821,10 @@ Texture Device::createStorageTexture(u32 width, u32 height, Format format) {
     if (fmt < 0) MKRHI_FATAL("Storage textures are Rgba8Unorm, Rgba16Float or R32Float");
     if (format == Format::R32Float && !m->float32Filterable)
         MKRHI_FATAL("R32Float storage textures need the float32-filterable WebGPU feature (direct slots are filterable textures)");
-    u32 slot = static_cast<u32>(fmt) * kStorageTexturesPerFormat;
-    const u32 end = slot + kStorageTexturesPerFormat;
+    u32 slot = kStorageFirst[fmt];
+    const u32 end = slot + kStoragePerFormat[fmt];
     while (slot < end && m->storageTextureSlots[slot]) ++slot;
-    if (slot == end) MKRHI_FATAL("WebGPU storage texture slots of this format exhausted (%u)", kStorageTexturesPerFormat);
+    if (slot == end) MKRHI_FATAL("WebGPU storage texture slots of this format exhausted (%u)", kStoragePerFormat[fmt]);
     Impl::TextureEntry entry;
     entry.storage = true;
     entry.storageSlot = slot;
@@ -803,24 +866,14 @@ bool Device::recreatePipeline(Pipeline pipeline, const ComputePipelineDesc& desc
 // ---------------------------------------------------------------- textures
 
 namespace {
-// Direct slots of the texture's kind (2D, cube or depth)
-u32* slotsOf(Device::Impl& m, bool cube, bool depth, u32* count) {
-    *count = depth ? kDirectDepths : cube ? kDirectCubes : kDirectTextures;
-    return depth ? m.depthSlots.data() : cube ? m.cubeSlots.data() : m.slots.data();
-}
-
-// Puts a texture into the next free direct slot of its kind. Fatal when they run out, like the bindless backends' slot exhaustion
-u32 allocSlot(Device::Impl& m, u32 textureId, bool cube, bool depth) {
-    u32 count = 0;
-    u32* first = slotsOf(m, cube, depth, &count);
-    for (u32 i = 0; i < count; ++i)
-        if (!first[i]) {
-            first[i] = textureId;
-            m.slotsChanged();
+// Gives a texture the next free direct id. Fatal when they run out, like the bindless backends' slot exhaustion
+u32 allocSlot(Device::Impl& m, u32 textureId, bool, bool) {
+    for (u32 i = 0; i < kDirectIds; ++i)
+        if (!m.directOwner[i]) {
+            m.directOwner[i] = textureId;
             return i;
         }
-    MKRHI_FATAL("WebGPU direct %s slots exhausted (%u)", depth ? "depth" : cube ? "cube" : "texture",
-                count);
+    MKRHI_FATAL("WebGPU direct texture ids exhausted (%u)", kDirectIds);
 }
 
 // Pool format slot (kPoolFormats order), or -1 for formats that stay direct
@@ -899,8 +952,10 @@ u32 allocLayer(Device::Impl& m, u32 poolIndex, Format format) {
 }
 
 void freeSlot(Device::Impl& m, const Device::Impl::TextureEntry& t) {
-    u32 count = 0;
-    slotsOf(m, t.cube, t.depth, &count)[t.slot] = 0;
+    const u32 id = m.directOwner[t.slot];
+    m.directOwner[t.slot] = 0;
+    for (u32& b : m.bound)
+        if (b == id) b = 0;
     m.slotsChanged();
 }
 } // namespace
@@ -1268,7 +1323,11 @@ void Device::endFrame(bool vsync, Capture* capture, PixelRead* reads, u32 readCo
                                                  [](wgpu::MapAsyncStatus, wgpu::StringView) {});
         timers.pending = true;
     }
+#ifdef __EMSCRIPTEN__
+    mkrhiWaitAnimationFrame();
+#else
     m->surface.Present();
+#endif
     m->backView = nullptr;
     m->backTexture = nullptr;
     if (vsync != m->vsync) { // the present mode only changes by configuring again
@@ -1413,6 +1472,35 @@ void CommandList::draw(u32 vertexCount, u32 instanceCount) {
 
 // WebGPU orders and synchronizes resource use itself. The state is kept only for storage textures: in UnorderedAccess they are bound
 // for writing in dispatches (and left out of group 2 there)
+// Group 2's textures for the next draws and dispatches (Wgpu.h kBound2D etc.): direct ones by kind, in order; extras are dropped
+void CommandList::useTextures(const u32* indices, u32 count) {
+    Device::Impl* m = m_device->impl();
+    std::array<u32, kBoundTextures> next{};
+    u32 used2D = 0;
+    bool dropped = false;
+    for (u32 i = 0; i < count; ++i) {
+        const u32 index = indices[i];
+        if (index == ~0u || ((index >> 19) & 31u) != kDirectPool) continue;
+        const u32 id = m->directOwner[(index >> 11) & 0xFFu];
+        if (!id) continue;
+        if (std::find(next.begin(), next.end(), id) != next.end()) continue;
+        const Device::Impl::TextureEntry& t = m->textures[id - 1];
+        u32* slot = t.depth ? &next[kBound2D + kBoundCubes] : t.cube ? &next[kBound2D] : used2D < kBound2D ? &next[used2D++] : nullptr;
+        if (!slot || *slot) {
+            dropped = true;
+            continue;
+        }
+        *slot = id;
+    }
+    static bool warned = false;
+    if (dropped && !warned) {
+        warned = true;
+        MKRHI_WARN("[WebGPU] useTextures: more direct textures than group 2 binds (%u 2D, %u cube, %u depth); the rest read wrong",
+                   kBound2D, kBoundCubes, kBoundDepths);
+    }
+    m->bound = next;
+}
+
 void CommandList::textureBarrier(Texture texture, TextureState, TextureState after) {
     Device::Impl* m = m_device->impl();
     m->endPass(); // copies run outside passes
@@ -1437,7 +1525,7 @@ void CommandList::dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) {
     pass.SetPipeline(m->computePipelines[m->pipeline - 1]);
     pass.SetBindGroup(0, m->group0);
     pass.SetBindGroup(1, m->group1);
-    pass.SetBindGroup(2, m->computeGroup2);
+    pass.SetBindGroup(2, m->group2(0, true));
     pass.SetBindGroup(3, m->computeGroup3);
     if (m->pushBytes) pass.SetImmediates(0, m->push, align(m->pushBytes, 4));
     pass.DispatchWorkgroups(groupsX, groupsY, groupsZ);

@@ -26,7 +26,7 @@ struct PushConstants // same layout as Renderer.cpp ForwardPush
 
 Particle loadParticle(uint index)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint o = pc.particleOffset + index * 32;
     Particle p;
     p.position = loadFloat3(b, o);
@@ -49,7 +49,7 @@ struct VSOutput
 
 VSOutput VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint f = pc.frameOffset;
     float4x4 viewProj = float4x4(loadFloat4(b, f), loadFloat4(b, f + 16), loadFloat4(b, f + 32), loadFloat4(b, f + 48));
     float3 cameraPos = loadFloat4(b, f + 64).xyz;

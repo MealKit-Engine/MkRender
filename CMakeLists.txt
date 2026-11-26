@@ -1,11 +1,13 @@
 # MkRender: MealKit's renderer as engine-free libraries (docs/ENGINE_MODULES.md "Middleware" in the MealKit repo).
-#   mkrhi     thin graphics API layer (DX12 or Vulkan), takes a native window handle and size
+#   mkrhi     thin graphics API layer (DX12, Vulkan or WebGPU), takes a native window handle and size
 #   mkrender  forward renderer on mkrhi with plain inputs, its shaders compiled by DXC at build time (MKRENDER_DXC)
 # No engine headers; the host passes a log callback (mkrhi::setLog) and, optionally, Dear ImGui and Tracy targets.
 # Built standalone it includes tests and the MkRender scene editor (tool/, Windows and Linux X11); added by another project with add_subdirectory, only the libraries.
 #   cmake -S . -B build && cmake --build build && ctest --test-dir build
 # Values the including side can set:
-#   MKRHI_BACKEND              DX12 (default) or Vulkan
+#   MKRHI_BACKEND              DX12 (default), Vulkan or WebGPU (work in progress: Dawn, Linux X11; no compute, ImGui or GPU timers yet)
+#   MKRHI_DAWN_DIR             WebGPU: Dawn's CMake package folder (lib64/cmake/Dawn; default: MealKit's download cache)
+#   MKRENDER_TINT              WebGPU: Tint (SPIR-V to WGSL; default: bin/tint next to that Dawn package)
 #   MKRHI_VULKAN_INCLUDE_DIRS  Vulkan headers, volk and VMA folders (default: this repo's third_party/; the loader is loaded at run time by volk)
 #   MKRHI_IMGUI_TARGET         Dear ImGui target with the backend for MKRHI_BACKEND: builds mkrhi::imgui* (debug UI drawing).
 #                              Only its include folders and definitions are used; the host links ImGui itself
@@ -18,12 +20,12 @@
 cmake_minimum_required(VERSION 3.25)
 project(mkrender VERSION 0.12.0 LANGUAGES C CXX)
 
-set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12 or Vulkan)")
-set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan)
+set(MKRHI_BACKEND "DX12" CACHE STRING "mkrhi graphics backend (DX12, Vulkan or WebGPU)")
+set_property(CACHE MKRHI_BACKEND PROPERTY STRINGS DX12 Vulkan WebGPU)
 option(MKRENDER_OBJECT_LIBRARIES "Build OBJECT libraries instead of STATIC" OFF)
 option(MKRENDER_DEBUG_VIEWS "Build the editor-only view modes (DebugView::BaseColor and later: their shader variant and code); OFF for shipping builds" ON)
 option(MKRENDER_BUILD_TESTS "Build MkRender tests" ${PROJECT_IS_TOP_LEVEL})
-if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND PROJECT_IS_TOP_LEVEL)
+if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND PROJECT_IS_TOP_LEVEL AND NOT MKRHI_BACKEND STREQUAL "WebGPU")
     set(mkrender_tool_default ON)
 else()
     set(mkrender_tool_default OFF)
@@ -59,8 +61,24 @@ if(MKRHI_BACKEND STREQUAL "Vulkan")
 elseif(MKRHI_BACKEND STREQUAL "DX12")
     list(APPEND mkrhi_sources src/mkrhi/dx12/Dx12.h src/mkrhi/dx12/Dx12Device.cpp)
     set(mkrhi_imgui_source src/mkrhi/dx12/Dx12ImGui.cpp)
+elseif(MKRHI_BACKEND STREQUAL "WebGPU")
+    list(APPEND mkrhi_sources src/mkrhi/webgpu/Wgpu.h src/mkrhi/webgpu/WgpuDevice.cpp)
+    if(MKRHI_IMGUI_TARGET)
+        message(FATAL_ERROR "The WebGPU backend has no ImGui drawing yet (MKRHI_IMGUI_TARGET)")
+    endif()
+    if(NOT MKRHI_DAWN_DIR)
+        file(GLOB mkrhi_dawn_dirs "$ENV{HOME}/.local/share/MealKit/tools/dawn-*/x/Dawn-*/lib64/cmake/Dawn")
+        list(SORT mkrhi_dawn_dirs)
+        list(POP_BACK mkrhi_dawn_dirs MKRHI_DAWN_DIR)
+    endif()
+    set(Dawn_DIR ${MKRHI_DAWN_DIR})
+    find_package(Threads REQUIRED)
+    find_package(Dawn REQUIRED)
+    if(NOT MKRENDER_TINT)
+        find_program(MKRENDER_TINT NAMES tint HINTS "${MKRHI_DAWN_DIR}/../../../bin" NO_DEFAULT_PATH)
+    endif()
 else()
-    message(FATAL_ERROR "MKRHI_BACKEND must be DX12 or Vulkan (got ${MKRHI_BACKEND})")
+    message(FATAL_ERROR "MKRHI_BACKEND must be DX12, Vulkan or WebGPU (got ${MKRHI_BACKEND})")
 endif()
 if(MKRHI_IMGUI_TARGET)
     list(APPEND mkrhi_sources ${mkrhi_imgui_source})
@@ -76,6 +94,8 @@ endif()
 if(MKRHI_BACKEND STREQUAL "Vulkan")
     target_include_directories(mkrhi SYSTEM PRIVATE ${MKRHI_VULKAN_INCLUDE_DIRS})
     target_compile_definitions(mkrhi PRIVATE VK_NO_PROTOTYPES $<$<BOOL:${WIN32}>:VK_USE_PLATFORM_WIN32_KHR>)
+elseif(MKRHI_BACKEND STREQUAL "WebGPU")
+    target_link_libraries(mkrhi PRIVATE dawn::webgpu_dawn)
 else()
     target_link_libraries(mkrhi PUBLIC d3d12 dxgi dxguid)
 endif()
@@ -154,9 +174,12 @@ endif()
 # --- mkrender ---
 # Shaders: DXC turns shaders/*.hlsl into byte-array headers at build time, both DXIL and SPIR-V (a failure on either side fails the build).
 # This backend's output goes to <build>/shaders/<name>.h (included by the renderer), the other to shaders/other/ (checked only).
+# WebGPU: a third output, SPIR-V 1.3 with MKRHI_WEBGPU=1 (no descriptor arrays, shaders/Bindless.hlsli) turned into WGSL by Tint.
+# Compute shaders have no WGSL yet (the WebGPU backend has no compute).
 # MKRENDER_DXC: a DXC with SPIR-V support (the Windows SDK one has none). Default: dxc on PATH or MealKit's download cache.
 if(NOT MKRENDER_DXC)
-    find_program(MKRENDER_DXC NAMES dxc HINTS "$ENV{LOCALAPPDATA}/MealKit/tools/dxc-v1.9.2609/bin/x64")
+    find_program(MKRENDER_DXC NAMES dxc HINTS "$ENV{LOCALAPPDATA}/MealKit/tools/dxc-v1.9.2609/bin/x64"
+        "$ENV{HOME}/.local/share/MealKit/tools/dxc-v1.9.2609/bin")
 endif()
 if(MKRENDER_DXC)
     set(MKRENDER_SHADER_OUT ${CMAKE_CURRENT_BINARY_DIR}/shaders)
@@ -168,7 +191,14 @@ if(MKRENDER_DXC)
         set(MKRENDER_DXIL_FLAGS -O3 -Qstrip_debug -Qstrip_reflect)
         set(MKRENDER_SPIRV_FLAGS -O3)
     endif()
+    set(MKRENDER_WGPU_SPIRV_FLAGS ${MKRENDER_SPIRV_FLAGS} -spirv -fspv-target-env=vulkan1.1) # Tint reads SPIR-V up to 1.3
     list(APPEND MKRENDER_SPIRV_FLAGS -spirv -fspv-target-env=vulkan1.3)
+    if(MKRHI_BACKEND STREQUAL "WebGPU")
+        if(NOT MKRENDER_TINT)
+            message(FATAL_ERROR "The WebGPU backend needs Tint (MKRENDER_TINT) to turn shaders into WGSL")
+        endif()
+        file(MAKE_DIRECTORY ${MKRENDER_SHADER_OUT}/webgpu)
+    endif()
     # The host's shader hot reload compiles this backend's format with the same options (MKRENDER_HOT_FLAGS, MKRENDER_SHADER_DIR)
     if(MKRHI_BACKEND STREQUAL "Vulkan")
         list(JOIN MKRENDER_SPIRV_FLAGS " " hot_flags)
@@ -197,6 +227,9 @@ if(MKRENDER_DXC)
         if(MKRHI_BACKEND STREQUAL "Vulkan")
             set(dxil ${MKRENDER_SHADER_OUT}/other/${name}.h)
             set(spirv ${MKRENDER_SHADER_OUT}/${name}.h)
+        elseif(MKRHI_BACKEND STREQUAL "WebGPU")
+            set(dxil ${MKRENDER_SHADER_OUT}/other/${name}.h)
+            set(spirv ${MKRENDER_SHADER_OUT}/other/${name}.spirv.h)
         else()
             set(dxil ${MKRENDER_SHADER_OUT}/${name}.h)
             set(spirv ${MKRENDER_SHADER_OUT}/other/${name}.h)
@@ -209,7 +242,21 @@ if(MKRENDER_DXC)
         add_custom_command(OUTPUT ${spirv}
             COMMAND ${MKRENDER_DXC} -nologo -T ${profile} -E ${entry} -Vn ${name} -Fh ${spirv} ${MKRENDER_SPIRV_FLAGS} ${spirv_entry} ${defines} ${src}
             DEPENDS ${deps} COMMENT "DXC ${source} (${entry}, SPIR-V)" VERBATIM)
-        set(mkrender_shader_headers ${mkrender_shader_headers} ${dxil} ${spirv} PARENT_SCOPE)
+        set(headers ${dxil} ${spirv})
+        if(MKRHI_BACKEND STREQUAL "WebGPU" AND NOT profile MATCHES "^cs_")
+            set(wgpu_spv ${MKRENDER_SHADER_OUT}/webgpu/${name}.spv)
+            set(wgsl ${MKRENDER_SHADER_OUT}/webgpu/${name}.wgsl)
+            set(header ${MKRENDER_SHADER_OUT}/${name}.h)
+            # Derivatives in non-uniform control flow (alpha tests, kNoTexture branches) are allowed like on DX12/Vulkan
+            add_custom_command(OUTPUT ${header}
+                COMMAND ${MKRENDER_DXC} -nologo -T ${profile} -E ${entry} -Fo ${wgpu_spv} ${MKRENDER_WGPU_SPIRV_FLAGS} ${spirv_entry}
+                        -D MKRHI_WEBGPU=1 ${defines} ${src}
+                COMMAND ${MKRENDER_TINT} --format wgsl --allow-non-uniform-derivatives true -o ${wgsl} ${wgpu_spv}
+                COMMAND ${CMAKE_COMMAND} -DIN=${wgsl} -DOUT=${header} -DNAME=${name} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/WgslHeader.cmake
+                DEPENDS ${deps} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/WgslHeader.cmake COMMENT "DXC + Tint ${source} (${entry}, WGSL)" VERBATIM)
+            list(APPEND headers ${header})
+        endif()
+        set(mkrender_shader_headers ${mkrender_shader_headers} ${headers} PARENT_SCOPE)
     endfunction()
 
     # SM 6.6 (minimum spec). One pixel shader per lighting model (LightingModel) + outline, shadow, sky, particle, sprite, post and UI passes
@@ -304,7 +351,10 @@ if(MKRENDER_BUILD_TESTS)
             target_compile_options(mkrender_golden PRIVATE /W4 /permissive- /utf-8)
         endif()
         add_test(NAME mkrender_golden COMMAND mkrender_golden WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-        # RHI compute (tests/ComputeTest.cpp): compute pipelines, storage buffers/textures, barriers on a hidden window. Skips without a GPU
+    endif()
+    # RHI compute (tests/ComputeTest.cpp): compute pipelines, storage buffers/textures, barriers on a hidden window. Skips without a GPU.
+    # Not on WebGPU (no compute there yet)
+    if((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND TARGET mkrender AND NOT MKRHI_BACKEND STREQUAL "WebGPU")
         add_executable(mkrender_compute tests/ComputeTest.cpp)
         target_link_libraries(mkrender_compute PRIVATE mkrhi)
         add_dependencies(mkrender_compute mkrender) # the compute test shader headers are built with it

@@ -40,7 +40,7 @@ static const uint kNoTex = 0xFFFFFFFFu;
 
 PostConstants loadPost()
 {
-    ByteAddressBuffer b = g_buffers[g_push.ring];
+    ByteAddressBuffer b = mkBuffer(g_push.ring);
     uint o = g_push.constOffset;
     PostConstants c;
     c.exposure = loadFloat4(b, o);
@@ -68,7 +68,7 @@ PostVSOut VSMain(uint id : SV_VertexID)
 float3 sampleSource(float2 uv)
 {
     uv = clamp(uv, g_push.rect.xy + g_push.texel * 0.5, g_push.rect.zw - g_push.texel * 0.5);
-    return g_textures[NonUniformResourceIndex(g_push.source)].SampleLevel(g_linearClamp, uv, 0).rgb;
+    return mkSampleLevel2D(g_push.source, g_linearClamp, uv, 0).rgb;
 }
 
 float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
@@ -165,9 +165,8 @@ float3 applyLut(uint lut, float3 c)
     float s1 = min(s0 + 1.0, 31.0);
     float u = c.r * 31.0 + 0.5;
     float v = (c.g * 31.0 + 0.5) / 32.0;
-    Texture2D t = g_textures[NonUniformResourceIndex(lut)];
-    float3 a = t.SampleLevel(g_linearClamp, float2((s0 * 32.0 + u) / 1024.0, v), 0).rgb;
-    float3 b = t.SampleLevel(g_linearClamp, float2((s1 * 32.0 + u) / 1024.0, v), 0).rgb;
+    float3 a = mkSampleLevel2D(lut, g_linearClamp, float2((s0 * 32.0 + u) / 1024.0, v), 0).rgb;
+    float3 b = mkSampleLevel2D(lut, g_linearClamp, float2((s1 * 32.0 + u) / 1024.0, v), 0).rgb;
     return lerp(a, b, slice - s0);
 }
 
@@ -242,7 +241,7 @@ float4 PSUber(PostVSOut input) : SV_Target
     if (!(flags & kPostToneMap)) return float4(toSrgb(color), 1.0);
 
     if (post.textures.x != kNoTex) // top of the bloom chain (half res, same uv)
-        color += g_textures[NonUniformResourceIndex(post.textures.x)].SampleLevel(g_linearClamp, uv, 0).rgb * post.bloom.rgb * post.exposure.y;
+        color += mkSampleLevel2D(post.textures.x, g_linearClamp, uv, 0).rgb * post.bloom.rgb * post.exposure.y;
     color *= post.exposure.x;
 
     float3 mapped = agx(color);

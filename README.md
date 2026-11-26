@@ -115,7 +115,10 @@ A `.gltf`/`.glb` opens in a new unsaved scene as one decoration. The build write
 ```
 build.bat                     # Windows: DX12, Release, Ninja; runs the tests (mkrender needs a DXC with SPIR-V support); add Vulkan for the Vulkan backend into build-vulkan\
 cmake -S . -B build && cmake --build build && ctest --test-dir build
+cmake -S . -B build/linux-webgpu -G Ninja -DMKRHI_BACKEND=WebGPU   # Linux X11, work in progress (Dawn + Tint, see below)
 ```
+
+The WebGPU backend (`src/mkrhi/webgpu/`) uses Dawn's release build (`MKRHI_DAWN_DIR`, default `~/.local/share/MealKit/tools/dawn-*`) and its `tint` to turn the shaders into WGSL: DXC writes SPIR-V 1.3 with `MKRHI_WEBGPU=1`, where `shaders/Bindless.hlsli` declares separately bound "direct slots" instead of descriptor arrays. Every texture takes a direct slot for now (16 2D, 4 cubes, 4 depth textures for shadow maps, read with a comparison sampler through `mkShadowGather`); texture array pools, compute, GPU timers and ImGui are not done yet. The goldens match the Vulkan references on Dawn's Vulkan backend.
 
 The tests include render goldens without the engine (`tests/GoldenTest.cpp`, Windows): `mkrender_golden` opens a hidden window, draws four fixed scenes made in code (PBR, toon and unlit lighting with shadows, point lights, an outline, bloom, particles and a UI panel; a 2D front view with sprites for layer order, blending, flips, point and linear sampling and a sheet cell) and compares each with `tests/golden/<shot>.png` like the engine's graphics regression test (a channel more than 8 apart makes a pixel off, at most 0.5% off). DX12 and Vulkan compare against the same images. On a difference it writes the image and a `-diff.png` (red = off) to `<build>/golden/`; `mkrender_golden --update` replaces the references after a change made on purpose. Without a GPU (CI) it prints SKIP and passes.
 

@@ -30,7 +30,7 @@ struct PushConstants // same layout as Renderer.cpp ForwardPush
 
 Sprite loadSprite(uint index)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint o = pc.spriteOffset + index * 80;
     Sprite s;
     s.position = loadFloat3(b, o);
@@ -62,7 +62,7 @@ struct VSOutput
 
 VSOutput VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint f = pc.frameOffset;
     float4x4 viewProj = float4x4(loadFloat4(b, f), loadFloat4(b, f + 16), loadFloat4(b, f + 32), loadFloat4(b, f + 48));
 
@@ -84,17 +84,15 @@ VSOutput VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 
 float4 PSMain(VSOutput input) : SV_Target
 {
-    Texture2D tex = g_textures[NonUniformResourceIndex(input.texFlags.x)];
     float4 texel;
     if (input.texFlags.y & 4)
     {
-        uint w, h;
-        tex.GetDimensions(w, h);
-        int2 p = clamp(int2(floor(input.uv * float2(w, h))), int2(0, 0), int2(w, h) - 1);
-        texel = tex.Load(int3(p, 0));
+        uint2 size = mkTextureSize2D(input.texFlags.x);
+        int2 p = clamp(int2(floor(input.uv * float2(size))), int2(0, 0), int2(size) - 1);
+        texel = mkLoad2D(input.texFlags.x, p, 0);
     }
     else
-        texel = tex.Sample(g_linearClamp, input.uv);
+        texel = mkSample2D(input.texFlags.x, g_linearClamp, input.uv);
     float a = texel.a * input.color.a;
     if (a <= 0.002) discard;
     return float4(texel.rgb * input.color.rgb * input.color.a, a);

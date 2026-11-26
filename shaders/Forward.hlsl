@@ -95,7 +95,7 @@ struct PushConstants
 
 FrameConstants loadFrame()
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint o = pc.frameOffset;
     FrameConstants f;
     // Row-major matrices (a line in CPU memory = a matrix row)
@@ -128,7 +128,7 @@ FrameConstants loadFrame()
 
 Material loadMaterial(FrameConstants frame, uint index)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint o = frame.materials.x + min(index, frame.materials.y - 1) * 128;
     Material m;
     m.baseColor = loadFloat4(b, o);
@@ -154,7 +154,7 @@ Material loadMaterial(FrameConstants frame, uint index)
 
 Instance loadInstance(uint index)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint o = pc.instanceOffset + index * 48;
     Instance i;
     i.position = loadFloat3(b, o);
@@ -217,7 +217,7 @@ float3 unpackAlbedo(uint c)
 // The reflection probe whose influence box contains the instance position with the closest center (one probe per object, no blending). 0 if none
 uint nearestProbe(FrameConstants frame, float3 position)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint best = 0;
     float bestDistance = 3.4e38;
     for (uint i = 0; i < frame.probes.y; ++i)
@@ -244,7 +244,7 @@ VSOutput transformVertex(VSInput input, bool outline)
 #if SKINNED
     // Skin: weighted sum of the four joints' palette matrices (CPU asset::skinPalette, MealKit coordinates). Normals use the same matrix (assumes no non-uniform scale)
     {
-        ByteAddressBuffer b = g_buffers[pc.ring];
+        ByteAddressBuffer b = mkBuffer(pc.ring);
         float3x4 skin = (float3x4)0;
         [unroll] for (uint k = 0; k < 4; ++k)
         {
@@ -280,7 +280,7 @@ VSOutput transformVertex(VSInput input, bool outline)
     o.flags = inst.flags;
     o.material = input.material.x;
     o.probe = nearestProbe(frame, inst.position);
-    o.lights = frame.lights.y != 0 ? g_buffers[pc.ring].Load2(pc.lightOffset + input.instanceId * 8) : uint2(0xFFFFFFFFu, 0xFFFFFFFFu);
+    o.lights = frame.lights.y != 0 ? mkBuffer(pc.ring).Load2(pc.lightOffset + input.instanceId * 8) : uint2(0xFFFFFFFFu, 0xFFFFFFFFu);
     return o;
 }
 
@@ -290,7 +290,7 @@ VSOutput VSOutline(VSInput input) { return transformVertex(input, true); }
 
 float4 sampleTexture(uint index, float2 uv, float4 fallback)
 {
-    return index == kNoTexture ? fallback : g_textures[NonUniformResourceIndex(index)].Sample(g_linearWrap, uv);
+    return index == kNoTexture ? fallback : mkSample2D(index, g_linearWrap, uv);
 }
 
 // Builds tangent space from screen derivatives without tangents (no tangents in vertices, docs/DECISIONS.md 2026-10-21 "Vertex format")
@@ -342,17 +342,17 @@ float3 reflection(FrameConstants f, float3 r, float roughness, uint probe)
     {
         uint cube = (probe - 1) & 0xFFFFFFu;
         float probeMips = float(max((probe - 1) >> 24, 1u) - 1);
-        return g_cubes[NonUniformResourceIndex(cube)].SampleLevel(g_linearClamp, r, roughness * probeMips).rgb;
+        return mkSampleCubeLevel(cube, g_linearClamp, r, roughness * probeMips).rgb;
     }
     float mips = float(max(f.env.z, 1u) - 1);
-    return g_cubes[NonUniformResourceIndex(f.env.y)].SampleLevel(g_linearClamp, envDirection(f, r), roughness * mips).rgb * f.envParams.x;
+    return mkSampleCubeLevel(f.env.y, g_linearClamp, envDirection(f, r), roughness * mips).rgb * f.envParams.x;
 }
 
 // Point lights (no shadows): distance attenuation is inverse square times a window function (0 at range). Diffuse is Lambert, PBR also GGX specular
 // diffuseColor = albedo × (1 − metallic). Not called by the unlit model
 float3 pointLights(FrameConstants f, uint2 lights, float3 worldPos, float3 n, float3 v, float3 diffuseColor, float3 f0, float roughness)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     float3 color = 0.0;
     [loop] for (uint i = 0; i < 8; ++i)
     {
@@ -370,7 +370,7 @@ float3 pointLights(FrameConstants f, uint2 lights, float3 worldPos, float3 n, fl
         float ndl = saturate(dot(n, l));
 #if LIGHTING_MODEL == 1
         // Toon: diffuse via the ramp (same color steps as the sun), no highlight
-        float3 ramp = g_textures[NonUniformResourceIndex(f.style.x)].SampleLevel(g_linearClamp, float2(saturate(dot(n, l) * 0.5 + 0.5), 0.5), 0).rgb;
+        float3 ramp = mkSampleLevel2D(f.style.x, g_linearClamp, float2(saturate(dot(n, l) * 0.5 + 0.5), 0.5), 0).rgb;
         color += diffuseColor * ramp * ramp * radiance * atten;
 #else
         float3 h = normalize(l + v);
@@ -406,15 +406,13 @@ float sunShadow(FrameConstants f, float3 worldPos, float3 n)
     float2 dims = float2(size * float(f.shadow.y), size);
     float2 texel = (float2(uv.x + float(c), uv.y) * float2(size, size)) - 0.5; // atlas pixels (relative to texel center)
     float receiver = clip.z + 0.0002;
-    Texture2D map = g_textures[NonUniformResourceIndex(f.shadow.x)];
     float lit = 0.0;
     [unroll] for (uint i = 0; i < 4; ++i)
     {
         float2 offset = float2((i & 1u) ? 1.0 : -1.0, (i & 2u) ? 1.0 : -1.0);
         float2 t = texel + offset;
         float2 base = floor(t), w = t - base;
-        float4 d = map.GatherRed(g_linearClamp, (base + 1.0) / dims); // (0,1) (1,1) (1,0) (0,0)
-        float4 s = step(d, receiver.xxxx);
+        float4 s = mkShadowGather(f.shadow.x, (base + 1.0) / dims, receiver); // (0,1) (1,1) (1,0) (0,0)
         lit += lerp(lerp(s.w, s.z, w.x), lerp(s.x, s.y, w.x), w.y);
     }
     lit *= 0.25;
@@ -576,14 +574,12 @@ float4 PSMain(VSOutput input) : SV_Target
         float3 tint = float3(0.25, 0.25, 0.25);
         if (mat.textures.x != kNoTexture)
         {
-            Texture2D tex = g_textures[NonUniformResourceIndex(mat.textures.x)];
             if (pc.debugView == 15)
-                tint = heatRamp(tex.CalculateLevelOfDetail(g_linearWrap, input.uv) / 5.0);
+                tint = heatRamp(mkLod2D(mat.textures.x, g_linearWrap, input.uv) / 5.0);
             else
             {
-                float w, h;
-                tex.GetDimensions(w, h);
-                float2 tx = ddx(input.uv) * float2(w, h), ty = ddy(input.uv) * float2(w, h);
+                float2 size = float2(mkTextureSize2D(mat.textures.x));
+                float2 tx = ddx(input.uv) * size, ty = ddy(input.uv) * size;
                 float texelArea = abs(tx.x * ty.y - tx.y * ty.x); // texels per pixel
                 float worldArea = length(cross(ddx(input.worldPos), ddy(input.worldPos))); // square meters per pixel
                 float density = sqrt(texelArea / max(worldArea, 1e-12)); // texels per meter
@@ -630,7 +626,7 @@ float4 PSMain(VSOutput input) : SV_Target
 #elif LIGHTING_MODEL == 1
     // Toon: diffuse via ramp texture (half Lambert → color steps), highlight is a single hard-edged spot. Metals tint highlights/environment
     // Shade goes to the dark side of the ramp (half of half Lambert)
-    float3 ramp = g_textures[NonUniformResourceIndex(frame.style.x)].SampleLevel(g_linearClamp, float2(saturate(halfLambert * lerp(0.5, 1.0, shadow)), 0.5), 0).rgb;
+    float3 ramp = mkSampleLevel2D(frame.style.x, g_linearClamp, float2(saturate(halfLambert * lerp(0.5, 1.0, shadow)), 0.5), 0).rgb;
     ramp *= ramp; // sRGB image → linear approximation
     float3 h = normalize(l + v);
     float shininess = 2.0 / max(roughness * roughness * roughness * roughness, 1e-3) - 2.0;
@@ -706,7 +702,7 @@ float4 PSSky(SkyOutput input) : SV_Target
     float3 d = normalize(world.xyz / world.w - frame.cameraPos.xyz);
     float3 color;
     if (frame.env.w != 0)
-        color = g_cubes[NonUniformResourceIndex(frame.env.x)].SampleLevel(g_linearClamp, envDirection(frame, d), 0).rgb * frame.envParams.x;
+        color = mkSampleCubeLevel(frame.env.x, g_linearClamp, envDirection(frame, d), 0).rgb * frame.envParams.x;
     else // no HDRI: fog color at the horizon (where fogged 3D meets it) up to the sky color overhead
         color = lerp(frame.fogColor.rgb, frame.skyColor.rgb, sqrt(saturate(d.y)));
     return float4(lerp(color, frame.screenTint.rgb, frame.screenTint.a), 1.0);

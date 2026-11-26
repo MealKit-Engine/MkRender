@@ -8,7 +8,7 @@
 // mkrhi: thin graphics API layer of MkRender (no engine headers; the host passes a native window handle and size).
 // Only as much as the renderer uses: device/swap chain, frame command lists, static buffers, textures, pipelines, frame upload ring, capture.
 // Its shape follows DX12 (command list recording, explicit barriers, bindless indices). One backend per build (CMake MKRHI_BACKEND: src/mkrhi/dx12/,
-// src/mkrhi/vulkan/), with per-backend .cpp files implementing the same classes without virtual functions. Graphics API headers stay in the backend folders.
+// src/mkrhi/vulkan/, src/mkrhi/webgpu/), with per-backend .cpp files implementing the same classes without virtual functions. Graphics API headers stay in the backend folders.
 //
 // Binding: every pipeline uses the same layout (shaders/Bindless.hlsli on the renderer side).
 //   push constants 64 bytes (HLSL `[[vk::push_constant]] ConstantBuffer<T> : register(b0)`)
@@ -37,7 +37,7 @@ enum class LogLevel : u8 { Info, Warn, Error, Fatal };
 using LogFn = void (*)(LogLevel level, const char* message, void* user);
 void setLog(LogFn fn, void* user = nullptr);
 
-// "dx12" or "vulkan": the backend this library was built with
+// "dx12", "vulkan" or "webgpu": the backend this library was built with
 const char* backendName();
 
 // GPU feature inspection results. Written to the startup log and `--system-info` (min-spec hardware measurement records).

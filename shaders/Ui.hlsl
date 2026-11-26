@@ -35,7 +35,7 @@ struct PushConstants
 
 UiQuad loadQuad(uint index)
 {
-    ByteAddressBuffer b = g_buffers[pc.ring];
+    ByteAddressBuffer b = mkBuffer(pc.ring);
     uint o = pc.quadOffset + index * 112;
     UiQuad q;
     q.rect = loadFloat4(b, o);
@@ -117,7 +117,7 @@ float4 PSMain(VSOutput input) : SV_Target
     if (kind == 2) // text (SDF, 0.5 = edge)
     {
         float2 uv = lerp(q.uv.xy, q.uv.zw, box01);
-        float s = g_textures[pc.glyphAtlas].SampleLevel(g_linearClamp, uv, 0).r;
+        float s = mkSampleLevel2D(pc.glyphAtlas, g_linearClamp, uv, 0).r;
         float inside = (s - 0.5) * q.sdfScale; // screen px inside the edge
         float a = saturate(inside + 0.5);
         float4 c = unpack(q.color0);
@@ -140,7 +140,7 @@ float4 PSMain(VSOutput input) : SV_Target
             float2 a = q.gradient.xy, ab = q.gradient.zw - q.gradient.xy;
             tint = lerp(tint, unpack(q.strokeColor), saturate(dot(box01 - a, ab) / max(dot(ab, ab), 1e-6)));
         }
-        fill = g_textures[pc.imageAtlas].SampleLevel(g_linearClamp, uv, 0) * tint;
+        fill = mkSampleLevel2D(pc.imageAtlas, g_linearClamp, uv, 0) * tint;
         float4 bright = unpack(q.color1); // brightness: toward white or black by its alpha
         fill.rgb = lerp(fill.rgb, bright.rgb, bright.a);
     }

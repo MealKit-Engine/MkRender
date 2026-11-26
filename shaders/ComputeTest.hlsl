@@ -32,7 +32,7 @@ void CSCopy(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= 64)
         return;
-    const float4 c = g_textures[g_push.textureSrv].Load(int3(id.x % 8, id.x / 8, 0));
+    const float4 c = mkLoad2D(g_push.textureSrv, int2(id.x % 8, id.x / 8), 0);
     const uint4 b = uint4(round(c * 255.0));
     g_rwBuffers[g_push.buffer].Store((g_push.count + id.x) * 4, b.x | (b.y << 8) | (b.z << 16) | (b.w << 24));
 }

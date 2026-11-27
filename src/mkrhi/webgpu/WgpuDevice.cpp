@@ -1250,6 +1250,7 @@ u8* Device::allocUpload(u64 bytes, u32 alignment, u64* offset) {
 }
 
 u32 Device::uploadBufferIndex() const { return 0; } // Bindless.hlsli mkBuffer: every index is the ring
+bool Device::readsEveryTexture() const { return false; } // group 2 binds what useTextures names
 u32 Device::copyPitch(u32 width, u32 bytesPerPixel) const { return align(width * bytesPerPixel, 256); } // bytesPerRow rule
 u32 Device::copyAlignment() const { return 16; }
 

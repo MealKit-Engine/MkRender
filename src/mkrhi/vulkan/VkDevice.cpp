@@ -1380,6 +1380,7 @@ u8* Device::allocUpload(u64 bytes, u32 alignment, u64* offset) {
 }
 
 u32 Device::uploadBufferIndex() const { return 0; }
+bool Device::readsEveryTexture() const { return true; }
 
 u32 Device::copyPitch(u32 width, u32 bytesPerPixel) const { return width * bytesPerPixel; }
 

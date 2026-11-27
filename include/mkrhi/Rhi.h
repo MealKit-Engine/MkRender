@@ -318,6 +318,8 @@ public:
     // Carves from this frame's upload ring (CPU write, GPU read). nullptr if out of space. offset is the byte position in the ring buffer
     u8* allocUpload(u64 bytes, u32 alignment, u64* offset);
     u32 uploadBufferIndex() const; // g_buffers[] index of the upload ring
+    // true: shaders read every texture (DX12, Vulkan); false: only pooled ones and those CommandList::useTextures names (WebGPU)
+    bool readsEveryTexture() const;
     u32 copyPitch(u32 width, u32 bytesPerPixel) const; // copyToTexture row pitch
     u32 copyAlignment() const;                         // copyToTexture start offset alignment
     // Submits and presents. If capture is given, waits for the GPU and reads the back buffer

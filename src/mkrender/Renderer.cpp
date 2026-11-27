@@ -1613,11 +1613,32 @@ void Renderer::drawSprites(const Sprite* sprites, u32 count) {
     mkrhi::CommandList& cmd = m->device.cmd();
     if (m->openPass == static_cast<i32>(GpuPass::Opaque)) m->beginPass(GpuPass::Vfx);
     cmd.setPipeline(m->sprites);
-    const ForwardPush push{m->device.uploadBufferIndex(), static_cast<u32>(m->frameOffset), static_cast<u32>(offset), 0, 0};
-    cmd.pushConstants(&push, sizeof(push));
-    cmd.draw(6, count);
+    ForwardPush push{m->device.uploadBufferIndex(), static_cast<u32>(m->frameOffset), static_cast<u32>(offset), 0, 0};
+    if (m->device.readsEveryTexture()) {
+        cmd.pushConstants(&push, sizeof(push));
+        cmd.draw(6, count);
+        m->stats.drawCalls += 1;
+    } else {
+        // WebGPU reads only pooled textures (square, power of two) and the two 2D textures useTextures names: sprite pictures are
+        // mostly neither, so draw runs of sprites (in their back-to-front order) that read at most two textures, naming them
+        for (u32 start = 0; start < count;) {
+            u32 textures[2] = {kNoTexture, kNoTexture}, used = 0, end = start;
+            for (; end < count; ++end) {
+                const u32 t = sprites[end].texture;
+                if (t == textures[0] || t == textures[1]) continue;
+                if (used == 2) break;
+                textures[used++] = t;
+            }
+            cmd.useTextures(textures, used);
+            push.instanceOffset = static_cast<u32>(offset + static_cast<u64>(start) * sizeof(Sprite));
+            cmd.pushConstants(&push, sizeof(push));
+            cmd.draw(6, end - start);
+            m->stats.drawCalls += 1;
+            start = end;
+        }
+        cmd.useTextures(m->sceneTextures.data(), static_cast<u32>(m->sceneTextures.size())); // the scene's again for later 3D
+    }
     cmd.setPipeline(m->scenePipeline());
-    m->stats.drawCalls += 1;
 }
 
 void Renderer::beginOverlay() {

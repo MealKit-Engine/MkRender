@@ -157,6 +157,12 @@ struct Device::Impl {
     wgpu::RenderPassEncoder pass;
     wgpu::Texture backTexture;
     wgpu::TextureView backView;
+#ifdef __EMSCRIPTEN__
+    // Browser: the frame is drawn into this texture (backTexture) and copied to the canvas's texture right before the submit. The
+    // canvas texture expires once the program yields to the event loop, and a JSPI wait inside a frame does that (a GPU readback
+    // not done yet, a pack chunk download): drawing into it directly then fails with "destroyed texture used in a submit"
+    wgpu::Texture frameTexture;
+#endif
     u32 frameIndex = 0;
     bool inFrame = false;
     bool backDrawn = false;   // the back buffer was bound this frame

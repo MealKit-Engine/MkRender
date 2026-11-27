@@ -238,6 +238,15 @@ bool Device::Impl::configureSurface() {
     config.device = device;
     config.format = swapFormat;
     config.usage = wgpu::TextureUsage::RenderAttachment | (swapCopySrc ? wgpu::TextureUsage::CopySrc : wgpu::TextureUsage::None);
+#ifdef __EMSCRIPTEN__
+    config.usage |= wgpu::TextureUsage::CopyDst; // endFrame copies frameTexture in
+    wgpu::TextureDescriptor td;
+    td.dimension = wgpu::TextureDimension::e2D;
+    td.size = {width, height, 1};
+    td.format = swapFormat;
+    td.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+    frameTexture = device.CreateTexture(&td);
+#endif
     config.width = width;
     config.height = height;
     config.alphaMode = wgpu::CompositeAlphaMode::Opaque;
@@ -1212,6 +1221,9 @@ bool Device::beginFrame() {
     if (!m || m->width == 0 || m->height == 0) return false;
     m->instance.ProcessEvents(); // error and device-lost callbacks
     if (m->surfaceDirty && !m->configureSurface()) return false;
+#ifdef __EMSCRIPTEN__
+    m->backTexture = m->frameTexture; // the canvas's texture is taken at endFrame (Wgpu.h frameTexture)
+#else
     wgpu::SurfaceTexture st;
     m->surface.GetCurrentTexture(&st);
     if (st.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal &&
@@ -1221,7 +1233,8 @@ bool Device::beginFrame() {
     }
     if (st.status == wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal) m->surfaceDirty = true;
     m->backTexture = st.texture;
-    m->backView = st.texture.CreateView();
+#endif
+    m->backView = m->backTexture.CreateView();
     m->encoder = m->device.CreateCommandEncoder();
     m->readTimers(m->timerFrames[m->frameIndex]); // this frame index's previous timestamps (kFramesInFlight frames ago)
     Impl::TimerFrame& timers = m->timerFrames[m->frameIndex];
@@ -1316,6 +1329,22 @@ void Device::endFrame(bool vsync, Capture* capture, PixelRead* reads, u32 readCo
         m->encoder.ResolveQuerySet(m->querySet, first, timers.queries, m->queryResolve, static_cast<u64>(first) * 8);
         m->encoder.CopyBufferToBuffer(m->queryResolve, static_cast<u64>(first) * 8, timers.readback, 0, Impl::kQueriesPerFrame * 8);
     }
+#ifdef __EMSCRIPTEN__
+    { // the canvas's texture, taken only now: nothing between here and the submit yields to the event loop
+        wgpu::SurfaceTexture st;
+        m->surface.GetCurrentTexture(&st);
+        if (st.status == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal ||
+            st.status == wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal) {
+            wgpu::TexelCopyTextureInfo src, dst;
+            src.texture = m->frameTexture;
+            dst.texture = st.texture;
+            const wgpu::Extent3D size{std::min(m->frameTexture.GetWidth(), st.texture.GetWidth()),
+                                      std::min(m->frameTexture.GetHeight(), st.texture.GetHeight()), 1};
+            m->encoder.CopyTextureToTexture(&src, &dst, &size);
+        }
+        if (st.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) m->surfaceDirty = true;
+    }
+#endif
     const wgpu::CommandBuffer commands = m->encoder.Finish();
     m->encoder = nullptr;
     m->queue.Submit(1, &commands);

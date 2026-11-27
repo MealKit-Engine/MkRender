@@ -3,7 +3,7 @@
 #   mkrender  forward renderer on mkrhi with plain inputs, its shaders compiled by DXC at build time (MKRENDER_DXC)
 # No engine headers; the host passes a log callback (mkrhi::setLog) and, optionally, Dear ImGui and Tracy targets.
 # Built standalone it includes tests and the MkRender scene editor (tool/, Windows and Linux X11); added by another project with add_subdirectory, only the libraries.
-#   cmake -S . -B build && cmake --build build && ctest --test-dir build
+#   cmake -S . -B build/linux && cmake --build build/linux && ctest --test-dir build/linux   (build/<os>: windows, linux, macos)
 # Values the including side can set:
 #   MKRHI_BACKEND              DX12 (default), Vulkan or WebGPU (work in progress: Dawn, Linux X11)
 #   MKRHI_DAWN_DIR             WebGPU: Dawn's CMake package folder (lib64/cmake/Dawn; default: MealKit's download cache)

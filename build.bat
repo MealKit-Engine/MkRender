@@ -1,12 +1,12 @@
 @echo off
-rem Builds MkRender (Release, Ninja) and runs the tests: libraries, tests and the MkRender viewer (build\bin\MkRender.exe).
-rem   build.bat          DX12 backend into build\
-rem   build.bat Vulkan   Vulkan backend into build-vulkan\
+rem Builds MkRender (Release, Ninja) and runs the tests: libraries, tests and the MkRender viewer (build\windows\bin\MkRender.exe).
+rem   build.bat          DX12 backend into build\windows\
+rem   build.bat Vulkan   Vulkan backend into build\windows-vulkan\
 setlocal
-set "BUILD=build"
+set "BUILD=build\windows"
 set "BACKEND=DX12"
 if /i "%~1"=="Vulkan" (
-    set "BUILD=build-vulkan"
+    set "BUILD=build\windows-vulkan"
     set "BACKEND=Vulkan"
 )
 if defined VCINSTALLDIR goto build

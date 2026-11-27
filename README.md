@@ -11,7 +11,7 @@ The renderer of the [MealKit](https://github.com/MealKit-Engine/MealKit) engine 
 | `mkterrain` | Heightmap terrain and scatter layers as data (`include/mkrender/Terrain.h`): 16-bit PNG heightmaps, surface height and ray hits, chunk meshes, raise/lower/flatten/smooth brushes, scatter text, painting and erasing; the editing half of MealKit's `asset/Terrain.h` and `asset/Scatter.h` with the same layout and files |
 | `mkbake` | CPU baking without GPU or files (`include/mkrender/Bake.h`): sky HDRI (sky cube, reflection cube with GGX mips, SH ambient), reflection probes from six rendered faces (`.mkprobe`), `.cube` LUTs, texture mips and BC7/BC5 (bc7enc/rgbcx), and the cache file bytes and names. The MealKit engine and the scene editor both bake with it, so their caches are the same files |
 
-**MkRender** (`build/bin/MkRender.exe`) is a scene editor built on them, like MkUI for `.ui` screens and MkAudio for sound events: it opens a MealKit project's `.scene` files with a hierarchy, a viewport and an inspector, and saves them for the engine (below).
+**MkRender** (`build/windows/bin/MkRender.exe`) is a scene editor built on them, like MkUI for `.ui` screens and MkAudio for sound events: it opens a MealKit project's `.scene` files with a hierarchy, a viewport and an inspector, and saves them for the engine (below).
 
 The libraries include no engine header. The host sets a log callback and passes plain values:
 
@@ -113,8 +113,8 @@ A `.gltf`/`.glb` opens in a new unsaved scene as one decoration. The build write
 ## Building
 
 ```
-build.bat                     # Windows: DX12, Release, Ninja; runs the tests (mkrender needs a DXC with SPIR-V support); add Vulkan for the Vulkan backend into build-vulkan\
-cmake -S . -B build && cmake --build build && ctest --test-dir build
+build.bat                     # Windows: DX12, Release, Ninja; runs the tests (mkrender needs a DXC with SPIR-V support); add Vulkan for the Vulkan backend into build\windows-vulkan\
+cmake -S . -B build/linux && cmake --build build/linux && ctest --test-dir build/linux   (build/<os>: windows, linux, macos)
 cmake -S . -B build/linux-webgpu -G Ninja -DMKRHI_BACKEND=WebGPU   # Linux X11 (Dawn + Tint, see below)
 emcmake cmake -S . -B build/web -G Ninja                            # browser (Emscripten; WebGPU is the only backend there)
 ```

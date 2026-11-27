@@ -11,11 +11,41 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
 // Browser: the canvas shows a frame when control goes back to the event loop. JSPI suspends the frame loop until the next
-// animation frame (the host's loop stays a plain loop). Hidden tabs get no animation frames: a 100 ms timer goes on instead
+// animation frame (the host's loop stays a plain loop). Hidden tabs get no animation frames and slow the page's timers to
+// about one a second, which would stall a multiplayer host: there a Worker's timer (not slowed) goes on at about 60 Hz.
+// A visible page whose frames stop (a covered window) gets the same after 100 ms. If no Worker can start (a page's content
+// security policy), the page timer is all that is left
 EM_ASYNC_JS(void, mkrhiWaitAnimationFrame, (), {
+    let s = Module.mkrhiFrames;
+    if (!s) {
+        s = Module.mkrhiFrames = { id: 0, wake: null, requested: false, stalled: false, worker: null };
+        try {
+            const code = "onmessage = (e) => setTimeout(() => postMessage(e.data.id), e.data.ms);";
+            s.worker = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+            s.worker.onmessage = (e) => { if (e.data === s.id && s.wake) s.wake(false); };
+            s.worker.onerror = () => { s.worker = null; };
+        } catch (e) {
+            console.warn("No frame timer worker: " + e);
+        }
+    }
     await new Promise((resolve) => {
-        requestAnimationFrame(resolve);
-        setTimeout(resolve, 100);
+        const id = ++s.id;
+        const backup = setTimeout(() => { if (id === s.id && s.wake) s.wake(false); }, 100);
+        s.wake = (animated) => {
+            s.wake = null;
+            s.stalled = !animated;
+            clearTimeout(backup);
+            resolve();
+        };
+        if (!s.requested) {
+            s.requested = true;
+            requestAnimationFrame(() => {
+                s.requested = false;
+                s.stalled = false;
+                if (s.wake) s.wake(true);
+            });
+        }
+        if (s.worker) s.worker.postMessage({ id, ms: document.hidden || s.stalled ? 16 : 100 });
     });
 });
 #endif
